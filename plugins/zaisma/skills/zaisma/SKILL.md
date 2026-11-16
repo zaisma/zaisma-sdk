@@ -5,7 +5,7 @@ description: Make, upload, publish, update or fix a browser game on Zaisma (zais
 
 # Zaisma
 
-Zaisma hosts browser games: any web game, from any engine, plays from one link (`zaisma.com/g/<slug>`) in any browser, as a guest, with no install. It takes no cut of sales and charges no fee to list; each game gets free hosting every month, and only a game that grows past it pays for hosting, a few cents a player. All of Zaisma is open source under the MIT license, and every building block it runs (rooms, player passes, saves) also works on the developer's own server.
+Zaisma hosts browser games: any web game, from any engine, plays from one link (`zaisma.com/g/<slug>`) in any browser, as a guest, with no install. It takes no cut of sales and charges no fee to list; each game gets free hosting every month, and only a game that grows past it pays for hosting, a few cents a player. Zaisma's developer tools are open source, so a game is never locked in: every building block it runs (rooms, player passes, saves) also works on the developer's own server.
 
 This skill is the workflow. The references beside it hold the details; open one only when the game needs it (the table at the end says when).
 

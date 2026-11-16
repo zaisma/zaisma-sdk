@@ -1,0 +1,9 @@
+{
+  "name": "zaisma",
+  "description": "Zaisma's MCP and the Zaisma skill together: make, upload, publish and fix browser games on Zaisma, from a one-file .io game to a PC-grade build.",
+  "author": { "name": "Zaisma", "url": "https://zaisma.com" },
+  "homepage": "https://zaisma.com/developers",
+  "repository": "https://github.com/zaisma/zaisma-sdk",
+  "license": "MIT",
+  "keywords": ["zaisma", "games", "browser-games", "mcp"]
+}

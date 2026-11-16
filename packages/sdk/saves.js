@@ -1,0 +1,964 @@
+/*
+ * Zaisma cloud saves, game side. The games server adds this to every page of a game
+ * that has cloud saves on; games don't include it themselves.
+ *
+ * It only ever talks to the Zaisma game page around it (zaisma.com), never to a server,
+ * and does nothing unless that page asks it to. The game page holds the player's
+ * session and does the saving; this script only reads and writes the game's own
+ * localStorage and IndexedDB, the storage the game already uses.
+ *
+ * A save is { save_format_version_number: 1, local_storage_items: { key: value }, indexeddb_databases: [databases] }:
+ * the game's localStorage, and the IndexedDB it keeps (Unity and Godot builds, localForage), [] when none.
+ *
+ * Two places it runs:
+ *  - <game>/_zaisma/restore: before the game opens, it shows the game page what's saved
+ *    on this device and puts the account's save in place if the page says so.
+ *  - every game page: while the page says to sync, it sends the save over whenever it
+ *    changes (checked every 30 seconds) and when the player leaves. When the page says to
+ *    apply a save (a developer's change, for a game that takes it in place), it puts it in
+ *    place while the game runs and says whether it could.
+ */
+(function () {
+  "use strict";
+  var site = __ZAISMA_SAVES__.site;
+  // Past this a save stays on the device (SAVE_LIMIT_BYTES in packages/core/src/saves.ts), so nothing past it is read.
+  var saveLimitBytes = __ZAISMA_SAVES__.saveLimitBytes || Infinity;
+  // The game version the games server served this page from, sent with each save as a label; null when unknown.
+  var versionId = typeof __ZAISMA_SAVES__.versionId === "string" ? __ZAISMA_SAVES__.versionId : null;
+  // Databases of downloaded game files, not progress (like Unity's UnityCache): never copied.
+  var SKIP = /cache/i;
+  var VIEWS = ["Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array", "DataView"];
+  var global = typeof globalThis !== "undefined" ? globalThis : window;
+  // Records read from IndexedDB at a time, so a read stops soon after a save goes past the limit: 16
+  // first, doubling up to 1,024 while a batch's text stays under 1 MB (games keep whole files as records).
+  var FIRST_BATCH_RECORD_COUNT = 16;
+  var MAXIMUM_BATCH_RECORD_COUNT = 1024;
+  var SMALL_BATCH_BYTE_COUNT = 1024 * 1024;
+
+  // Tests check the save format through this (test/node/saves.test.ts).
+  if (__ZAISMA_SAVES__.test) return __ZAISMA_SAVES__.test({ encode: encode, decode: decode, saveText: saveText, putSave: putSave, readDatabases: readDatabases, databasesReader: databasesReader });
+  // The same script, started as a worker by the game page below: it reads the databases off the thread that draws the game.
+  if (typeof window === "undefined") return serveReads();
+  if (window.parent === window) return;
+  var scriptUrl = document.currentScript ? document.currentScript.src : "";
+
+  // --- The save format ---
+
+  function snapshot() {
+    var local = {};
+    for (var i = 0; i < localStorage.length; i++) {
+      var key = localStorage.key(i);
+      local[key] = localStorage.getItem(key);
+    }
+    return local;
+  }
+  // Keys sorted, so the same save is always the same text (matches canonicalSave on the server).
+  function canonical(local) {
+    var out = {};
+    Object.keys(local)
+      .sort()
+      .forEach(function (key) {
+        set(out, key, local[key]);
+      });
+    return JSON.stringify(out);
+  }
+  /** The whole save as text. idbText is the encoded databases, or "" when there are none. */
+  function saveText(local, idbText) {
+    return textOf(canonical(local), idbText);
+  }
+  // The same text as canonicalSave on the server: all three keys, always in this order.
+  /** Text's size in UTF-8 bytes, as the server counts a save against the limit, without encoding it. */
+  function byteLength(text) {
+    var byteCount = text.length;
+    for (var i = 0; i < text.length; i++) {
+      var code = text.charCodeAt(i);
+      if (code < 0x80) continue;
+      // Two bytes below U+0800, and each half of a surrogate pair (four bytes the pair); three for the rest.
+      byteCount += code < 0x800 || (code >= 0xd800 && code < 0xe000) ? 1 : 2;
+    }
+    return byteCount;
+  }
+  function textOf(localText, idbText) {
+    return '{"save_format_version_number":1,"local_storage_items":' + localText + ',"indexeddb_databases":' + (idbText || "[]") + "}";
+  }
+  function set(target, key, entryValue) {
+    if (key === "__proto__") Object.defineProperty(target, key, { value: entryValue, enumerable: true, writable: true, configurable: true });
+    else target[key] = entryValue;
+  }
+
+  // IndexedDB holds more than JSON can (dates, binary data, files, maps), so those become
+  // tagged objects: { "$z": [kind, ...] }. A plain object with its own "$z" key is tagged
+  // too ("obj"), so nothing is ever mistaken for a tag. Blobs are read afterwards: their
+  // reads go into `pending`.
+  function encode(given, pending, seen) {
+    if (given === null || typeof given === "boolean" || typeof given === "string") return given;
+    if (typeof given === "number") return isFinite(given) && !(given === 0 && 1 / given < 0) ? given : { $z: ["num", given === 0 ? "-0" : String(given)] };
+    if (given === undefined) return { $z: ["undef"] };
+    if (typeof given === "bigint") return { $z: ["bigint", given.toString()] };
+    if (typeof given !== "object") throw new Error("Can't save a " + typeof given);
+    if (seen.indexOf(given) !== -1) throw new Error("Can't save a value that contains itself");
+    var kind = Object.prototype.toString.call(given).slice(8, -1);
+    if (kind === "Date") return { $z: ["date", encode(given.getTime(), pending, seen)] };
+    if (kind === "RegExp") return { $z: ["regexp", given.source, given.flags] };
+    if (kind === "ArrayBuffer") return { $z: ["bytes", toBase64(new Uint8Array(given))] };
+    if (ArrayBuffer.isView(given)) return { $z: ["view", VIEWS.indexOf(kind) === -1 ? "Uint8Array" : kind, toBase64(new Uint8Array(given.buffer, given.byteOffset, given.byteLength))] };
+    if (kind === "Blob" || kind === "File") {
+      var tag = kind === "File" ? { $z: ["file", given.type, "", given.name, given.lastModified] } : { $z: ["blob", given.type, ""] };
+      // What the blob adds once read: its bytes in base64.
+      pending.blobCharacterCount = (pending.blobCharacterCount || 0) + Math.ceil(given.size / 3) * 4;
+      pending.push(
+        given.arrayBuffer().then(function (buffer) {
+          tag.$z[2] = toBase64(new Uint8Array(buffer));
+        }),
+      );
+      return tag;
+    }
+    seen.push(given);
+    var out;
+    if (kind === "Map" || kind === "Set") {
+      var items = [];
+      given.forEach(function (entryValue, key) {
+        items.push(kind === "Map" ? [encode(key, pending, seen), encode(entryValue, pending, seen)] : encode(entryValue, pending, seen));
+      });
+      out = { $z: [kind === "Map" ? "map" : "set", items] };
+    } else if (Array.isArray(given)) {
+      out = [];
+      for (var i = 0; i < given.length; i++) out.push(encode(given[i], pending, seen));
+    } else {
+      out = {};
+      Object.keys(given).forEach(function (key) {
+        set(out, key, encode(given[key], pending, seen));
+      });
+      if (Object.prototype.hasOwnProperty.call(given, "$z")) out = { $z: ["obj", out] };
+    }
+    seen.pop();
+    return out;
+  }
+
+  function decode(encoded) {
+    if (encoded === null || typeof encoded !== "object") return encoded;
+    if (Array.isArray(encoded)) return encoded.map(decode);
+    var tag = Object.prototype.hasOwnProperty.call(encoded, "$z") ? encoded.$z : null;
+    if (!Array.isArray(tag)) return plain(encoded);
+    switch (tag[0]) {
+      case "num":
+        return Number(tag[1]);
+      case "undef":
+        return undefined;
+      case "bigint":
+        return BigInt(tag[1]);
+      case "date":
+        return new Date(decode(tag[1]));
+      case "regexp":
+        return new RegExp(tag[1], tag[2]);
+      case "bytes":
+        return fromBase64(tag[1]).buffer;
+      case "view":
+        var bytes = fromBase64(tag[2]);
+        if (tag[1] === "DataView") return new DataView(bytes.buffer);
+        return VIEWS.indexOf(tag[1]) === -1 ? bytes : new global[tag[1]](bytes.buffer);
+      case "blob":
+        return new Blob([fromBase64(tag[2])], { type: tag[1] });
+      case "file":
+        return new File([fromBase64(tag[2])], tag[3], { type: tag[1], lastModified: tag[4] });
+      case "map":
+        return new Map(
+          tag[1].map(function (entry) {
+            return [decode(entry[0]), decode(entry[1])];
+          }),
+        );
+      case "set":
+        return new Set(tag[1].map(decode));
+      case "obj":
+        return plain(tag[1]);
+    }
+    return plain(encoded);
+  }
+  function plain(object) {
+    var out = {};
+    Object.keys(object).forEach(function (key) {
+      set(out, key, decode(object[key]));
+    });
+    return out;
+  }
+
+  function toBase64(bytes) {
+    var binary = "";
+    for (var i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(binary);
+  }
+  function fromBase64(text) {
+    var binary = atob(text);
+    var out = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  }
+
+  // --- IndexedDB ---
+
+  function request(databaseRequest) {
+    return new Promise(function (ok, fail) {
+      databaseRequest.onsuccess = function () {
+        ok(databaseRequest.result);
+      };
+      databaseRequest.onerror = function () {
+        fail(databaseRequest.error);
+      };
+    });
+  }
+  function names() {
+    if (typeof indexedDB === "undefined" || !indexedDB || !indexedDB.databases) return Promise.resolve([]);
+    return indexedDB.databases().then(function (list) {
+      return list
+        .map(function (database) {
+          return database.name;
+        })
+        .filter(function (name) {
+          return typeof name === "string" && !SKIP.test(name);
+        })
+        .sort();
+    });
+  }
+  function open(name, version, upgrade) {
+    return new Promise(function (ok, fail) {
+      var opening = version ? indexedDB.open(name, version) : indexedDB.open(name);
+      opening.onupgradeneeded = function () {
+        if (upgrade) upgrade(opening.result);
+      };
+      opening.onsuccess = function () {
+        var database = opening.result;
+        // Never hold up the game's own database upgrades.
+        database.onversionchange = function () {
+          database.close();
+        };
+        ok(database);
+      };
+      opening.onerror = function () {
+        fail(opening.error);
+      };
+    });
+  }
+  function storeNames(database) {
+    return Array.prototype.slice.call(database.objectStoreNames).sort();
+  }
+  /** How a store is set up, in a fixed shape so two can be compared as text. */
+  function shape(store) {
+    return {
+      name: store.name,
+      keyPath: keyPath(store.keyPath),
+      autoIncrement: store.autoIncrement,
+      indexes: Array.prototype.slice
+        .call(store.indexNames)
+        .sort()
+        .map(function (name) {
+          var index = store.index(name);
+          return { name: name, keyPath: keyPath(index.keyPath), unique: index.unique, multiEntry: index.multiEntry };
+        }),
+    };
+  }
+  function savedShape(saved) {
+    return { name: saved.name, keyPath: saved.keyPath, autoIncrement: saved.autoIncrement, indexes: saved.indexes };
+  }
+  // A key path is a name, a list of names (some browsers give a DOMStringList) or none.
+  function keyPath(path) {
+    return path === null || typeof path === "string" ? path : Array.prototype.slice.call(path);
+  }
+
+  /**
+   * Every database the game keeps, sorted by name so the same data always reads the same:
+   * [{ name, version, stores: [{ name, keyPath, autoIncrement, indexes, records: [[key, value]] }] }].
+   * Databases with nothing in them are left out.
+   */
+  function readDatabases() {
+    return names().then(function (list) {
+      return Promise.all(list.map(readDatabase)).then(function (databases) {
+        return databases.filter(Boolean);
+      });
+    });
+  }
+  function readDatabase(name) {
+    var created = false;
+    return open(name, 0, function () {
+      created = true;
+    }).then(function (database) {
+      var stores = storeNames(database);
+      if (created || !stores.length) {
+        database.close();
+        // It was deleted after the list was read; don't leave an empty one behind.
+        if (created) indexedDB.deleteDatabase(name);
+        return null;
+      }
+      return new Promise(function (ok, fail) {
+        var transaction = database.transaction(stores, "readonly");
+        var out = stores.map(function (storeName) {
+          var store = transaction.objectStore(storeName);
+          var copy = shape(store);
+          var keys = store.getAllKeys();
+          var values = store.getAll();
+          values.onsuccess = function () {
+            copy.records = values.result.map(function (record, i) {
+              return [keys.result[i], record];
+            });
+          };
+          return copy;
+        });
+        transaction.oncomplete = function () {
+          database.close();
+          var hasRecords = out.some(function (copied) {
+            return copied.records.length;
+          });
+          ok(hasRecords ? { name: name, version: database.version, stores: out } : null);
+        };
+        transaction.onerror = transaction.onabort = function () {
+          database.close();
+          fail(transaction.error);
+        };
+      });
+    });
+  }
+  /** The databases as save text: "" when there are none. */
+  function readNumberbText() {
+    return readDatabases().then(function (databases) {
+      if (!databases.length) return "";
+      var pending = [];
+      var out = encode(databases, pending, []);
+      return Promise.all(pending).then(function () {
+        return JSON.stringify(out);
+      });
+    });
+  }
+
+  /**
+   * readNumberbText while the game plays: each store's text is kept, and a read only reads again the stores
+   * the game changed (changed: { isAll, isCountCheck, databases: [name], stores: ["<database>\n<store>"] }), a batch
+   * of records at a time, stopping once the save passes maximumByteCount bytes (UTF-8, as the server counts).
+   * isCountCheck also reads again any database whose version, stores or record counts changed, which catches most
+   * writes the script can't watch (the game's own workers) without reading what didn't change. The text is exactly
+   * readNumberbText's, put together from the kept parts. Answers { text } or { isOverLimit: true }.
+   */
+  function databasesReader() {
+    // Database name -> { version, stores: { name: { text, hasRecords } } }
+    var kept = {};
+    return function read(changed, maximumByteCount) {
+      var changedStores = {};
+      changed.stores.forEach(function (storeKey) {
+        changedStores[storeKey] = true;
+      });
+      return names().then(function (list) {
+        var keptNow = {};
+        var byteCount = 0;
+        var index = 0;
+        function next() {
+          if (index === list.length) {
+            kept = keptNow;
+            var parts = list.filter(function (name) {
+              return keptNow[name] && keptNow[name].hasRecords;
+            }).map(function (name) {
+              var database = keptNow[name];
+              var storeTexts = database.storeNames.map(function (storeName) {
+                return database.stores[storeName].text;
+              });
+              return '{"name":' + JSON.stringify(name) + ',"version":' + JSON.stringify(encode(database.version, [], [])) + ',"stores":[' + storeTexts.join(",") + "]}";
+            });
+            return { text: parts.length ? "[" + parts.join(",") + "]" : "" };
+          }
+          var name = list[index++];
+          var before = kept[name];
+          var isWhole = changed.isAll || !before || changed.databases.indexOf(name) !== -1;
+          var isAnyStore = isWhole || Object.keys(changedStores).some(function (storeKey) {
+            return storeKey.indexOf(name + "\n") === 0;
+          });
+          var keep = function () {
+            keptNow[name] = before;
+            byteCount += before.byteCount;
+            return byteCount > maximumByteCount ? { isOverLimit: true } : next();
+          };
+          var readAgain = function (isWholeRead) {
+            return readChanged(name, before, isWholeRead, changedStores, maximumByteCount - byteCount).then(function (database) {
+              if (database && database.isOverLimit) return { isOverLimit: true };
+              if (database) {
+                keptNow[name] = database;
+                byteCount += database.byteCount;
+              }
+              return next();
+            });
+          };
+          if (isAnyStore) return readAgain(isWhole);
+          if (!changed.isCountCheck) return keep();
+          return countsChanged(name, before).then(function (isChanged) {
+            return isChanged ? readAgain(true) : keep();
+          });
+        }
+        return next();
+      });
+    };
+  }
+  /** Whether a database kept from an earlier read looks changed: its version, stores or a store's record count. Only counts are read, never records. */
+  function countsChanged(name, before) {
+    var created = false;
+    return open(name, 0, function () {
+      created = true;
+    }).then(function (database) {
+      var stores = storeNames(database);
+      if (created || database.version !== before.version || stores.join("\n") !== before.storeNames.join("\n")) {
+        database.close();
+        if (created) indexedDB.deleteDatabase(name);
+        return true;
+      }
+      if (!stores.length) {
+        database.close();
+        return false;
+      }
+      return new Promise(function (ok) {
+        var transaction = database.transaction(stores, "readonly");
+        var recordCounts = {};
+        stores.forEach(function (storeName) {
+          var counting = transaction.objectStore(storeName).count();
+          counting.onsuccess = function () {
+            recordCounts[storeName] = counting.result;
+          };
+        });
+        transaction.oncomplete = function () {
+          database.close();
+          ok(
+            stores.some(function (storeName) {
+              return recordCounts[storeName] !== before.stores[storeName].recordCount;
+            }),
+          );
+        };
+        transaction.onerror = transaction.onabort = function () {
+          database.close();
+          ok(true);
+        };
+      });
+    });
+  }
+  /** One database for databasesReader: its stores read again where changed, the rest as kept. null when it's gone or has no stores. */
+  function readChanged(name, before, isWhole, changedStores, maximumByteCount) {
+    var created = false;
+    return open(name, 0, function () {
+      created = true;
+    }).then(function (database) {
+      var stores = storeNames(database);
+      if (created || !stores.length) {
+        database.close();
+        if (created) indexedDB.deleteDatabase(name);
+        return null;
+      }
+      // Another version of the game's database is set up anew: read all of it.
+      if (!before || before.version !== database.version) isWhole = true;
+      var reading = stores.filter(function (storeName) {
+        return isWhole || !before.stores[storeName] || changedStores[name + "\n" + storeName];
+      });
+      var out = { version: database.version, storeNames: stores, stores: {}, byteCount: 0, hasRecords: false };
+      stores.forEach(function (storeName) {
+        if (reading.indexOf(storeName) === -1) out.stores[storeName] = before.stores[storeName];
+      });
+      stores.forEach(function (storeName) {
+        if (out.stores[storeName]) out.byteCount += out.stores[storeName].byteCount;
+      });
+      if (!reading.length) {
+        database.close();
+        return finish(out);
+      }
+      return new Promise(function (ok, fail) {
+        var transaction = database.transaction(reading, "readonly");
+        var pending = [];
+        var read = [];
+        var isOverLimit = false;
+        var storeIndex = 0;
+        var store = null;
+        var copy = null;
+        function nextStore() {
+          if (storeIndex === reading.length) return;
+          store = transaction.objectStore(reading[storeIndex++]);
+          copy = { shape: shape(store), records: [] };
+          read.push(copy);
+          nextBatch(null, FIRST_BATCH_RECORD_COUNT);
+        }
+        function nextBatch(afterKey, batchRecordCount) {
+          var range = afterKey === null ? null : IDBKeyRange.lowerBound(afterKey, true);
+          var keys = store.getAllKeys(range, batchRecordCount);
+          var values = store.getAll(range, batchRecordCount);
+          values.onsuccess = function () {
+            var previousByteCount = out.byteCount;
+            var blobCharacterCount = pending.blobCharacterCount || 0;
+            values.result.forEach(function (record, i) {
+              var encoded = encode([keys.result[i], record], pending, []);
+              copy.records.push(encoded);
+              out.byteCount += byteLength(JSON.stringify(encoded)) + 1;
+            });
+            // A file's base64 text is all ASCII: a character a byte.
+            out.byteCount += (pending.blobCharacterCount || 0) - blobCharacterCount;
+            if (out.byteCount > maximumByteCount) {
+              isOverLimit = true;
+              transaction.abort();
+              return;
+            }
+            var isSmall = out.byteCount - previousByteCount < SMALL_BATCH_BYTE_COUNT;
+            if (values.result.length === batchRecordCount) nextBatch(keys.result[keys.result.length - 1], isSmall ? Math.min(batchRecordCount * 2, MAXIMUM_BATCH_RECORD_COUNT) : batchRecordCount);
+            else nextStore();
+          };
+        }
+        nextStore();
+        transaction.oncomplete = function () {
+          database.close();
+          Promise.all(pending).then(function () {
+            read.forEach(function (stored) {
+              var shapeText = JSON.stringify(encode(stored.shape, [], []));
+              var recordTexts = stored.records.map(function (record) {
+                return JSON.stringify(record);
+              });
+              var storeText = shapeText.slice(0, -1) + ',"records":[' + recordTexts.join(",") + "]}";
+              out.stores[stored.shape.name] = { text: storeText, byteCount: byteLength(storeText), recordCount: stored.records.length, hasRecords: stored.records.length > 0 };
+            });
+            out.byteCount = 0;
+            stores.forEach(function (storeName) {
+              out.byteCount += out.stores[storeName].byteCount;
+            });
+            ok(finish(out));
+          }, fail);
+        };
+        transaction.onerror = transaction.onabort = function () {
+          database.close();
+          if (isOverLimit) ok({ isOverLimit: true });
+          else fail(transaction.error);
+        };
+      });
+    });
+  }
+  function finish(database) {
+    database.hasRecords = database.storeNames.some(function (storeName) {
+      return database.stores[storeName].hasRecords;
+    });
+    return database;
+  }
+
+  /** The worker side: reads asked for by the game page, one at a time, each answered with its id. */
+  function serveReads() {
+    var read = databasesReader();
+    addEventListener("message", function (event) {
+      var asked = event.data || {};
+      read(asked.changed, asked.maximumByteCount).then(
+        function (answer) {
+          answer.id = asked.id;
+          postMessage(answer);
+        },
+        function () {
+          postMessage({ id: asked.id, isFailed: true });
+        },
+      );
+    });
+  }
+
+  /**
+   * Make IndexedDB hold exactly `dbs`. A database set up the same way is emptied and
+   * refilled; one set up differently (another version of the game) is deleted and made
+   * again, which waits while the game is open in another tab (onBlocked says so).
+   */
+  function writeDatabases(databases, onBlocked) {
+    var wanted = {};
+    databases.forEach(function (database) {
+      wanted[database.name] = database;
+    });
+    return names().then(function (list) {
+      var here = {};
+      list.forEach(function (name) {
+        here[name] = true;
+      });
+      var empty = list.filter(function (name) {
+        return !wanted[name];
+      });
+      return Promise.all(
+        empty
+          .map(function (name) {
+            return fill(name, null, true, onBlocked);
+          })
+          .concat(
+            databases.map(function (database) {
+              return fill(database.name, database, Boolean(here[database.name]), onBlocked);
+            }),
+          ),
+      );
+    });
+  }
+  function fill(name, saved, exists, onBlocked) {
+    if (!exists) return saved ? create(saved) : Promise.resolve();
+    return open(name).then(function (database) {
+      if (!saved || (database.version === saved.version && sameShape(database, saved))) return write(database, saved);
+      database.close();
+      return drop(name, onBlocked).then(function () {
+        return create(saved);
+      });
+    });
+  }
+  function sameShape(database, saved) {
+    var stores = storeNames(database);
+    var theirs = saved.stores.map(savedShape).sort(function (first, second) {
+      return first.name < second.name ? -1 : 1;
+    });
+    if (stores.join("\n") !== theirs.map(function (stored) { return stored.name; }).join("\n")) return false;
+    if (!stores.length) return true;
+    var transaction = database.transaction(stores, "readonly");
+    return JSON.stringify(stores.map(function (storeName) { return shape(transaction.objectStore(storeName)); })) === JSON.stringify(theirs);
+  }
+  function create(saved) {
+    return open(saved.name, saved.version, function (database) {
+      saved.stores.forEach(function (stored) {
+        var store = database.createObjectStore(stored.name, { keyPath: stored.keyPath, autoIncrement: stored.autoIncrement });
+        stored.indexes.forEach(function (savedIndex) {
+          store.createIndex(savedIndex.name, savedIndex.keyPath, { unique: savedIndex.unique, multiEntry: savedIndex.multiEntry });
+        });
+      });
+    }).then(function (database) {
+      return write(database, saved);
+    });
+  }
+  /** Empty every store, then put the saved records back (when there are any). */
+  function write(database, saved) {
+    var stores = storeNames(database);
+    if (!stores.length) {
+      database.close();
+      return Promise.resolve();
+    }
+    return new Promise(function (ok, fail) {
+      var transaction = database.transaction(stores, "readwrite");
+      transaction.oncomplete = function () {
+        database.close();
+        ok();
+      };
+      transaction.onerror = transaction.onabort = function () {
+        database.close();
+        fail(transaction.error);
+      };
+      try {
+        stores.forEach(function (storeName) {
+          transaction.objectStore(storeName).clear();
+        });
+        (saved ? saved.stores : []).forEach(function (stored) {
+          var store = transaction.objectStore(stored.name);
+          stored.records.forEach(function (record) {
+            if (store.keyPath === null) store.put(record[1], record[0]);
+            else store.put(record[1]);
+          });
+        });
+      } catch (error) {
+        transaction.abort();
+      }
+    });
+  }
+  function drop(name, onBlocked) {
+    var deleting = indexedDB.deleteDatabase(name);
+    deleting.onblocked = onBlocked;
+    return request(deleting);
+  }
+
+  /** Put the account's save in place of this device's. onBlocked: it's waiting on another tab. */
+  function putSave(save, onBlocked) {
+    // The page always hands over a v1 save.
+    var local = save.local_storage_items;
+    var databases = decode(save.indexeddb_databases);
+    // IndexedDB first, so a database that can't be set up leaves localStorage as it was.
+    var writing =
+      window.indexedDB && indexedDB.databases
+        ? writeDatabases(databases, onBlocked)
+        : databases.length
+          ? Promise.reject(new Error("No IndexedDB here"))
+          : Promise.resolve();
+    return writing.then(function () {
+      // A write that throws (the browser's storage is full) puts this device's localStorage back as it was.
+      var before = snapshot();
+      try {
+        localStorage.clear();
+        Object.keys(local).forEach(function (key) {
+          localStorage.setItem(key, String(local[key]));
+        });
+      } catch (error) {
+        localStorage.clear();
+        Object.keys(before).forEach(function (key) {
+          localStorage.setItem(key, before[key]);
+        });
+        throw error;
+      }
+    });
+  }
+
+  // --- Talking to the game page ---
+
+  function post(message) {
+    message.type = "zaisma:saves";
+    parent.postMessage(message, site);
+  }
+  function listen(listener) {
+    addEventListener("message", function (event) {
+      if (event.origin !== site || event.source !== parent || !event.data || event.data.type !== "zaisma:saves") return;
+      listener(event.data);
+    });
+  }
+
+  if (/\/_zaisma\/restore$/.test(location.pathname)) {
+    // The game starts at its root, with the query the game page passed (like ?room=ABC234).
+    var query = decodeURIComponent(location.hash.slice(1));
+    var target = new URL("../" + (/^\?[\w=&%-]*$/.test(query) ? query : ""), location.href).href;
+    var go = function () {
+      location.replace(target);
+    };
+    // If the game page never answers, play anyway.
+    var timer = setTimeout(go, 8000);
+    // The game's database is open in another tab: say so here, where the player is looking.
+    var blocked = function () {
+      post({ step: "blocked" });
+      if (document.getElementById("zaisma-blocked")) return;
+      var note = document.createElement("p");
+      note.id = "zaisma-blocked";
+      note.textContent = "This game is open in another tab. Close it there to load your saved progress.";
+      note.style.cssText = "margin:0;position:fixed;inset:0;display:grid;place-items:center;padding:24px;color:#d8dde3;font:16px/1.5 system-ui,sans-serif;text-align:center";
+      document.body.appendChild(note);
+    };
+    listen(function (message) {
+      // The player is choosing between two saves: wait for them.
+      if (message.step === "wait") clearTimeout(timer);
+      if (message.step !== "restore") return;
+      clearTimeout(timer);
+      if (message.action !== "use-cloud" || !message.data || typeof message.data !== "object") return go();
+      Promise.resolve(message.data)
+        .then(function (save) {
+          return putSave(save, blocked);
+        })
+        .then(
+          function () {
+            post({ step: "restored", ok: true });
+          },
+          function () {
+            post({ step: "restored", ok: false });
+          },
+        )
+        .then(go);
+    });
+    // A device whose saves can't be read plays without saving to the account (broken).
+    readNumberbText()
+      .then(function (idbText) {
+        return saveText(snapshot(), idbText);
+      })
+      .then(
+        function (text) {
+          post({ step: "hello", phase: "restore", text: text, versionId: versionId });
+        },
+        function () {
+          post({ step: "hello", phase: "restore", text: "", broken: true, versionId: versionId });
+        },
+      );
+    return;
+  }
+
+  // What the game changed since the last check, so a check reads only that again: a store, a whole
+  // database (set up anew or deleted) or localStorage. Writes the game's own workers make, and
+  // localStorage set as a property, aren't seen: every 10th check (5 minutes) reads localStorage and any
+  // database whose version or record counts changed, and leaving the page reads every database whole.
+  var changedStores = {};
+  var changedDatabases = {};
+  var isLocalChanged = true;
+  var isAllChanged = true;
+  function watch(prototype, methods, mark) {
+    methods.forEach(function (name) {
+      var original = prototype && prototype[name];
+      if (typeof original !== "function") return;
+      prototype[name] = function () {
+        try {
+          mark(this, arguments);
+        } catch (error) {
+          isAllChanged = true;
+        }
+        return original.apply(this, arguments);
+      };
+    });
+  }
+  function markStore(store) {
+    changedStores[store.transaction.db.name + "\n" + store.name] = true;
+  }
+  if (window.IDBObjectStore) {
+    watch(IDBObjectStore.prototype, ["put", "add", "delete", "clear"], markStore);
+    watch(window.IDBCursor && IDBCursor.prototype, ["update", "delete"], function (cursor) {
+      markStore(cursor.source.objectStore || cursor.source);
+    });
+    watch(window.IDBDatabase && IDBDatabase.prototype, ["createObjectStore", "deleteObjectStore"], function (database) {
+      changedDatabases[database.name] = true;
+    });
+    watch(IDBFactory.prototype, ["deleteDatabase"], function (factory, given) {
+      changedDatabases[String(given[0])] = true;
+    });
+    watch(IDBFactory.prototype, ["open"], function (factory, given) {
+      if (given.length > 1) changedDatabases[String(given[0])] = true;
+    });
+  }
+  if (window.Storage) {
+    watch(Storage.prototype, ["setItem", "removeItem", "clear"], function (storage) {
+      if (storage === localStorage) isLocalChanged = true;
+    });
+  }
+  // Another tab of the game changed localStorage.
+  addEventListener("storage", function () {
+    isLocalChanged = true;
+  });
+
+  // Databases are read in a worker running this same script, so reading and encoding a big save never
+  // holds up the game's frames; where a worker can't start or read, the same reader runs here.
+  var worker = null;
+  var isWorkerTried = false;
+  var hereReader = null;
+  var waiting = null;
+  var readNumber = 0;
+  function readDatabasesText(changed, maximumByteCount) {
+    if (!isWorkerTried) {
+      isWorkerTried = true;
+      try {
+        if (scriptUrl && window.Worker) {
+          worker = new Worker(scriptUrl);
+          worker.onmessage = function (event) {
+            if (waiting && event.data && event.data.id === waiting.id) waiting.done(event.data);
+          };
+          worker.onerror = function () {
+            worker = null;
+            if (waiting) waiting.done({ isFailed: true });
+          };
+        }
+      } catch (error) {
+        worker = null;
+      }
+    }
+    if (!worker) {
+      hereReader = hereReader || databasesReader();
+      return hereReader(changed, maximumByteCount);
+    }
+    var id = ++readNumber;
+    return new Promise(function (ok) {
+      waiting = {
+        id: id,
+        done: function (answer) {
+          waiting = null;
+          ok(answer);
+        },
+      };
+      worker.postMessage({ id: id, changed: changed, maximumByteCount: maximumByteCount });
+    }).then(function (answer) {
+      if (!answer.isFailed) return answer;
+      // The worker can't read here (or stopped): read on the page from now on, from the start.
+      if (worker) worker.terminate();
+      worker = null;
+      hereReader = databasesReader();
+      return hereReader({ isAll: true, databases: [], stores: [] }, maximumByteCount);
+    });
+  }
+
+  var syncing = false;
+  var last = null;
+  var timer = null;
+  var localText = null;
+  var localByteCount = 0;
+  var idbText = null;
+  var checkCount = 0;
+  var reading = false;
+  var again = false;
+  // localStorage this small is read at every check anyway, which also catches it set as a property.
+  var SMALL_LOCAL_CHARACTER_COUNT = 64 * 1024;
+  /**
+   * isLeaving: the player is leaving the tab, so localStorage is read whatever was seen. isWhole: the page is going
+   * away, so every database is read whole, catching any write the script couldn't see.
+   */
+  function check(isLeaving, isWhole) {
+    if (!syncing) return;
+    if (reading) {
+      again = true;
+      return;
+    }
+    var isAll = isAllChanged || idbText === null || isWhole === true;
+    // Every 10th check (5 minutes), also what the script can't watch: localStorage, and databases whose version or record counts changed.
+    var isCountCheck = !isAll && ++checkCount % 10 === 0;
+    var changed = { isAll: isAll, isCountCheck: isCountCheck, databases: Object.keys(changedDatabases), stores: Object.keys(changedStores) };
+    var readsIdb = isAll || isCountCheck || changed.databases.length > 0 || changed.stores.length > 0;
+    var readsLocal = isAll || isCountCheck || isLocalChanged || localText === null || isLeaving === true || localText.length < SMALL_LOCAL_CHARACTER_COUNT;
+    if (!readsIdb && !readsLocal) return;
+    changedStores = {};
+    changedDatabases = {};
+    isAllChanged = false;
+    isLocalChanged = false;
+    reading = true;
+    if (readsLocal) {
+      localText = canonical(snapshot());
+      localByteCount = byteLength(localText);
+    }
+    var maximumByteCount = saveLimitBytes - localByteCount;
+    (readsIdb ? readDatabasesText(changed, maximumByteCount) : Promise.resolve({ text: idbText }))
+      .then(function (answer) {
+        if (answer.isFailed) throw new Error("The save couldn't be read");
+        if (answer.isOverLimit || localByteCount > saveLimitBytes) {
+          // Read again in full next time: what's kept stopped partway.
+          idbText = null;
+          post({ step: "over_limit" });
+          return;
+        }
+        idbText = answer.text;
+        var text = textOf(localText, answer.text);
+        if (text === last) return;
+        last = text;
+        post({ step: "save", text: text, versionId: versionId });
+      })
+      // Nothing is sent when the save can't be read, so a half-read save never replaces a whole one.
+      .catch(function () {
+        isAllChanged = true;
+        localText = null;
+      })
+      .then(function () {
+        reading = false;
+        if (again) {
+          again = false;
+          check(true);
+        }
+      });
+  }
+  listen(function (message) {
+    if (message.step === "sync") {
+      syncing = true;
+      last = typeof message.text === "string" ? message.text : null;
+      clearInterval(timer);
+      timer = setInterval(check, 30000);
+      check();
+    } else if (message.step === "pause") {
+      syncing = false;
+      clearInterval(timer);
+    } else if (message.step === "apply" && message.data && typeof message.data === "object") {
+      apply(message.data);
+    }
+  });
+  // Put a save in place under the running game. A database the game holds open can't be set up again
+  // while it runs, so that fails at once (the page reloads the game instead) rather than waiting.
+  function apply(save) {
+    new Promise(function (ok, fail) {
+      putSave(save, function () {
+        fail(new Error("The game holds its database open"));
+      }).then(ok, fail);
+    })
+      .then(
+        function () {
+          // What's in storage now is the save the page sent, already encoded: nothing is read again on the game's thread.
+          idbText = save.indexeddb_databases.length ? JSON.stringify(save.indexeddb_databases) : "";
+          localText = canonical(snapshot());
+          localByteCount = byteLength(localText);
+          // The worker's kept parts are from before: the next check reads everything there (and finds nothing new).
+          isAllChanged = true;
+          last = textOf(localText, idbText);
+          post({ step: "applied", ok: true });
+        },
+        function () {
+          post({ step: "applied", ok: false });
+        },
+      );
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") check(true);
+  });
+  addEventListener("pagehide", function () {
+    check(true, true);
+  });
+  post({ step: "hello", phase: "game", versionId: versionId });
+})();

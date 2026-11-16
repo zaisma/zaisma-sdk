@@ -1,0 +1,14 @@
+{
+  "name": "zaisma",
+  "owner": { "name": "Zaisma", "url": "https://zaisma.com" },
+  "metadata": { "description": "Zaisma's own plugins: make, upload and publish browser games on Zaisma from your AI." },
+  "plugins": [
+    {
+      "name": "zaisma",
+      "source": "./plugins/zaisma",
+      "description": "Zaisma's MCP and the Zaisma skill together: make, upload, publish and fix browser games on Zaisma.",
+      "homepage": "https://zaisma.com/developers",
+      "license": "MIT"
+    }
+  ]
+}

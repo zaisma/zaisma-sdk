@@ -1,0 +1,70 @@
+import type { Server } from "node:http";
+import type { GameDatabase, GameServer, IdentifyPlayer, PublicKey } from "../src/index.ts";
+
+/** What startServer takes. Only gameServer and gameSlug are required; the rest have the defaults named here. */
+export interface StartServerOptions {
+  /** Your game server: the default export of your server.ts (a defineGameServer object), or relay. */
+  gameServer: GameServer;
+  /** Your game's Zaisma slug: 1 to 40 lowercase letters, digits or hyphens. */
+  gameSlug: string;
+  /** The port to listen on. Default 8080; 0 picks a free one. */
+  port?: number;
+  /** The page origins that may connect. Default `https://<gameSlug>.zaismausercontent.com`; an empty list allows any page, for local testing. */
+  origins?: string[];
+  /** Who signs your players' passes. Default https://rooms.zaisma.com (PASS_ISSUER_URL). */
+  issuerUrl?: string;
+  /** The keys that check passes. Default: this game's, the ones `<issuerUrl>/v1/pass-keys/<gameSlug>` publishes, kept an hour. Called with true to fetch them again. */
+  loadPassKeys?: (isRefreshing?: boolean) => Promise<PublicKey[]>;
+  /** The keys that check receipts (room.verifyReceipt). Default: the ones `<issuerUrl>/.well-known/receipt-jwks.json` publishes. */
+  loadReceiptKeys?: (isRefreshing?: boolean) => Promise<PublicKey[]>;
+  /** An account's public profile, or null when no account has that ID. Default: looked up at `<issuerUrl>/v1/players/<id>`. */
+  loadProfile?: (playerId: string) => Promise<{ name: string } | null>;
+  /** The game's database (room.database). Default: a local SQLite file, zaisma-database.sqlite, made the first time the game uses it. */
+  database?: GameDatabase;
+  /** room.secrets and server.secrets. Default: this process's environment variables. */
+  secrets?: Readonly<Record<string, string>>;
+  /** The signing secret of the Zaisma webhook whose events come to /v1/webhooks. Default: the ZAISMA_WEBHOOK_SIGNING_SECRET environment variable. */
+  webhookSigningSecret?: string;
+  /** Where rooms save their states, so a restart brings matches back. Default zaisma-room-states.sqlite; null keeps none. */
+  roomStateFile?: string | null;
+  /** Where room.readDataFile and server.readDataFile read data files from. Default: zaisma-server, the game server's own folder. */
+  dataFolder?: string;
+  /** An API key with purchase_access write for this game, which onPurchase and onRefund need. Default: the ZAISMA_KEY environment variable. */
+  zaismaKey?: string;
+  /** Zaisma's developer API, which marks purchases handled. Default: https://zaisma.com/api/dev. */
+  developerApiUrl?: string;
+  /**
+   * The fast lane: the UDP port where WebTransport sessions come, for games that join with transport: "webtransport".
+   * Give it with certificatePath and certificateKeyPath, or none of the three. It needs the optional packages
+   * @fails-components/webtransport and @fails-components/webtransport-transport-http3-quiche.
+   */
+  webtransportPort?: number;
+  /** The fast lane's certificate for the server's name, a PEM file (Let's Encrypt's fullchain.pem): WebTransport can't sit behind a TLS proxy, so the runner holds it. */
+  certificatePath?: string;
+  /** The fast lane's certificate key, a PEM file (Let's Encrypt's privkey.pem). */
+  certificateKeyPath?: string;
+  /**
+   * Who a player from outside Zaisma is: a game played off its Zaisma page sends a playerToken in place of a pass
+   * (Zaisma.setUpOffZaisma), and this answers { id, name } for it, or null to refuse (bad_player_token). They join
+   * with kind "outside_zaisma". signInWithZaismaPlayers({ signInAppIds }) makes one for Sign in with Zaisma; your
+   * own checks your game's own accounts. One that throws answers busy. None by default: only Zaisma passes.
+   */
+  identifyPlayer?: IdentifyPlayer;
+  /** Let players from outside Zaisma with no token (playerToken: null) in as guests (guestPlayer): false by default. */
+  outsideGuestsEnabled?: boolean;
+}
+
+export interface RunningServer {
+  /** Saves every room, tells players to reconnect, and finishes once the server has stopped. */
+  close(): Promise<void>;
+  /** The HTTP server, for its address (httpServer.address()). */
+  httpServer: Server;
+  /** Settles once the fast lane listens (at once without one), or rejects with a GameServerError saying why it can't start. */
+  fastLaneReady: Promise<void>;
+}
+
+/**
+ * Run a game server on your own Node server (Node 22.18 or later). Throws a GameServerError
+ * (unknown_option, bad_option) for options it doesn't take, before anything listens.
+ */
+export function startServer(options: StartServerOptions): RunningServer;

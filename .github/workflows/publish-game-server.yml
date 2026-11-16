@@ -1,0 +1,57 @@
+# The only way @zaisma/game-server reaches npm: from this repository's main, through npm's trusted publishing with provenance,
+# never from a laptop. npm shows the commit that built each version. No token or secret is used anywhere: the only credential is
+# the OIDC token that `id-token: write` gives this job. The code was tested before it reached this repository; this job builds
+# the package and checks it loads before it publishes.
+name: Publish game server
+
+on:
+  push:
+    branches: [main]
+    paths: ["packages/game-server/**", "packages/sdk/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-game-server
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish @zaisma/game-server
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Trusted publishing needs npm 11.5.1 or newer.
+      - run: npm install -g npm@11.6.2
+      - name: Is this version new?
+        id: version
+        run: |
+          VERSION=$(node -p "require('./packages/game-server/package.json').version")
+          if npm view "@zaisma/game-server@$VERSION" version >/dev/null 2>&1; then
+            echo "is_new=false" >> "$GITHUB_OUTPUT"
+            echo "@zaisma/game-server $VERSION is already on npm: nothing to publish."
+          else
+            echo "is_new=true" >> "$GITHUB_OUTPUT"
+            echo "@zaisma/game-server $VERSION is new: publishing."
+          fi
+      - if: steps.version.outputs.is_new == 'true'
+        run: npm install --no-audit --no-fund
+      - if: steps.version.outputs.is_new == 'true'
+        run: npm run build -w packages/game-server
+      # The built package loads, as Node and as its runner.
+      - if: steps.version.outputs.is_new == 'true'
+        working-directory: packages/game-server/dist
+        run: |
+          node -e "import('./src/index.js').then((module) => { if (typeof module.verifyPass !== 'function') process.exit(1) })"
+          node bin/node.js --help 2>&1 | grep -q "Usage: zaisma-game-server"
+          npm pack --dry-run
+      - if: steps.version.outputs.is_new == 'true'
+        working-directory: packages/game-server/dist
+        run: npm publish --provenance --access public

@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "zaisma": { "type": "http", "url": "https://zaisma.com/mcp" }
+  }
+}

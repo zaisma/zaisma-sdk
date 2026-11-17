@@ -54,8 +54,9 @@ function playwrightChromes() {
  * test/node/chrome-no-gpu.test.ts holds this, and that nothing else starts a Chrome.
  */
 export function chromeFlags({ isDrawingOnCpu = false } = {}) {
+  // Always muted: a scripted Chrome never plays sound on the Mac it runs on (~/studio/rules/previews.md).
   const drawing = isDrawingOnCpu ? ["--disable-gpu"] : ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"];
-  return ["--headless=new", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", ...drawing, "--autoplay-policy=no-user-gesture-required", "--hide-scrollbars", "--disable-renderer-backgrounding", "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows"];
+  return ["--headless=new", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", ...drawing, "--autoplay-policy=no-user-gesture-required", "--mute-audio", "--hide-scrollbars", "--disable-renderer-backgrounding", "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows"];
 }
 
 /**

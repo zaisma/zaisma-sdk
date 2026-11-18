@@ -699,7 +699,7 @@
   if (/\/_zaisma\/restore$/.test(location.pathname)) {
     // The game starts at its root, with the query the game page passed (like ?room=ABC234).
     var query = decodeURIComponent(location.hash.slice(1));
-    var target = new URL("../" + (/^\?[\w=&%-]*$/.test(query) ? query : ""), location.href).href;
+    var target = new URL("../" + (/^\?[\w=&%+.*~-]*$/.test(query) ? query : ""), location.href).href;
     var go = function () {
       location.replace(target);
     };

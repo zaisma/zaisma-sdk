@@ -1152,7 +1152,10 @@ export async function startLocalPlay(givenOptions) {
         // Back from a sign-in that left the page: into the room the player was in, while it's still going.
         const lastRoom = lastRoomCodes.get(givenNumber);
         if (!room && lastRoom && roomsTracked.has(lastRoom)) room = lastRoom;
-        const framePath = `/p/${givenNumber}/g/${gameSlug}${room ? `?room=${room}` : "?play"}`;
+        // The page's own query goes on to the player's game page, as it would on zaisma.com.
+        const rest = new URLSearchParams(url.searchParams);
+        for (const name of ["player", "room", "play"]) rest.delete(name);
+        const framePath = `/p/${givenNumber}/g/${gameSlug}${room ? `?room=${room}` : "?play"}${rest.size ? `&${rest}` : ""}`;
         return sendPage(response, await glass.devPage(placesFor(request), devViewFor(givenNumber), { path: framePath, allow: FRAME_ALLOW }));
       }
       if (url.pathname.startsWith("/bench/") && !/^\/bench\/(kept\.js|panel|api)(\/|$)/.test(url.pathname)) return await answerBench(request, response, url);

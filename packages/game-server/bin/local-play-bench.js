@@ -15,7 +15,11 @@ export const KEPT_SCRIPT_SOURCE = `try { new BroadcastChannel("zaisma").postMess
 var keptPlayerNumber = Number(new URL(document.currentScript.src).searchParams.get("player")) || 0;
 setTimeout(function () {
   if (window.opener) window.close();
-  else location.replace(keptPlayerNumber ? "/?player=" + keptPlayerNumber : "/");
+  else {
+    // The dev page's own query (kept by the dev script for this tab) goes back with the player.
+    var rest = ""; try { rest = sessionStorage.getItem("zaisma-bench:query") || ""; } catch (error) {}
+    location.replace(keptPlayerNumber ? "/?player=" + keptPlayerNumber + (rest ? "&" + rest : "") : "/" + (rest ? "?" + rest : ""));
+  }
 }, 800);
 `;
 
@@ -23,10 +27,12 @@ setTimeout(function () {
 export const ARRIVE_SCRIPT_SOURCE = `(function () {
   var kept = null;
   try { kept = Number(sessionStorage.getItem("zaisma-bench:player")) || null; } catch (error) {}
-  var room = /^[A-Z0-9]{6}$/.test(new URLSearchParams(location.search).get("room") || "") ? new URLSearchParams(location.search).get("room") : null;
+  // The page's own query goes through with the player (a room code only when it's a real one).
+  var rest = new URLSearchParams(location.search); rest.delete("player");
+  if (!/^[A-Z0-9]{6}$/.test(rest.get("room") || "")) rest.delete("room");
   fetch("/bench/claim", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ keptPlayerNumber: kept }) })
     .then(function (response) { return response.json(); })
-    .then(function (answer) { location.replace("/?player=" + answer.playerNumber + (room ? "&room=" + room : "")); });
+    .then(function (answer) { location.replace("/?player=" + answer.playerNumber + (rest.toString() ? "&" + rest.toString() : "")); });
 })();
 `;
 
@@ -38,7 +44,12 @@ function devScript() {
   try {
     // The Players page a sign-in opened knows its player from the tab (a tab opened by a page starts with a copy of the page's storage).
     if (isPage && !playerNumber) playerNumber = Number(sessionStorage.getItem("zaisma-bench:player")) || 0;
-    else sessionStorage.setItem("zaisma-bench:player", String(playerNumber));
+    else {
+      sessionStorage.setItem("zaisma-bench:player", String(playerNumber));
+      // The page's own query, besides the player, for the way back from a sign-in (KEPT_SCRIPT_SOURCE).
+      const rest = new URLSearchParams(location.search); rest.delete("player");
+      if (!isPage) sessionStorage.setItem("zaisma-bench:query", rest.toString());
+    }
   } catch {
     // Storage off: the tab is a new player each time it comes to /.
   }

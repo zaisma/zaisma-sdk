@@ -9263,7 +9263,7 @@ var GAME_SERVER_LIMITS = {
   maximumMemorySizeBytes: 128 * 1024 * 1024
 };
 var ROOM_LIMITS = {
-  /** Players in one room: what one room carries at 60 ticks a second (test/load/room-load.test.ts). */
+  /** Players in one room: what one room carries at 60 ticks a second in the local test (test/load/room-load.test.ts); in the first runs on Cloudflare, a room held 60 up to about 50 players and made about 40 past 70. */
   maximumPlayerCount: 100,
   defaultMaximumPlayerCount: 8,
   /** Spectators in one room: each send costs the room time, so its audience is bounded like its players. Bigger audiences are a stream. */

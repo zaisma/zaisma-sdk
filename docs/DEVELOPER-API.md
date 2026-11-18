@@ -1100,6 +1100,7 @@ A room answers a refusal with `{ type: "error", code, message }`, then closes th
 | `bad_idle_timeout` | The SDK's own: an `idleTimeoutSec` that isn't from 30 to 86400. |
 | `bad_transport` | The SDK's own: a `transport` that isn't `"websocket"` or `"webtransport"`. |
 | `zaisma_rooms_not_used` | The SDK's own: the game doesn't use Zaisma rooms, so there are none to join or list. |
+| `no_online_play_in_preview` | The SDK's own: the game is a preview of a version players don't have yet, which never plays online, so a test build never reaches live rooms. Test online play with `npx @zaisma/cli play-locally`, or publish the version and play it through a tester link (`add_tester_link`). A draft or private game's own page plays its live version online for its developer. |
 
 ### Close codes
 

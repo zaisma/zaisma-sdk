@@ -1759,8 +1759,9 @@ declare namespace Zaisma {
 
   /**
    * The codes the SDK's errors have: a room's ({@link RoomErrorCode}), and:
-   * - unchecked: no player pass, because the game isn't played on its zaisma.com page, Zaisma couldn't check the browser, or it's a preview
-   *   of a version players don't have yet (its message says so: test online play with play-locally or a tester link).
+   * - unchecked: no player pass, because the game isn't played on its zaisma.com page or Zaisma couldn't check the browser.
+   * - no_online_play_in_preview: no player pass, because the game is a preview of a version players don't have yet, so a test build never
+   *   reaches live rooms. Test online play with `npx @zaisma/cli play-locally`, or publish the version and play it through a tester link.
    * - unknown_option, unknown_event: a call the SDK doesn't take; the message lists what it does.
    * - slow_down: too many calls; try again in a minute.
    * - zaisma_rooms_not_used: the game doesn't use Zaisma rooms.
@@ -1801,6 +1802,7 @@ declare namespace Zaisma {
     | "chat_too_fast"
     | "chat_not_here"
     | "unchecked"
+    | "no_online_play_in_preview"
     | "unknown_option"
     | "unknown_event"
     | "slow_down"

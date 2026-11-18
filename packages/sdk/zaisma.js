@@ -192,6 +192,7 @@
   var passPromise = null;
   var keyPromise = null;
   var UNCHECKED = "Zaisma couldn't check this browser, so it can't play online. Reload the game to try again.";
+  var NO_ONLINE_PLAY_IN_PREVIEW = "Online play is off in a preview of a version players don't have yet. Test online play with npx @zaisma/cli play-locally, or publish the version and play it through a tester link.";
 
   /**
    * The game page's key to player passes, as { key, playerKind }: whose passes it gives, the signed-in
@@ -202,6 +203,7 @@
     if (!keyPromise) {
       keyPromise = new Promise(function (resolve, reject) {
         function fail(message) { reject(codedError("unchecked", message)); }
+        function failInPreview(message) { reject(codedError("no_online_play_in_preview", message)); }
         if (!config.site || window.parent === window) return fail("Online play works when the game is played on Zaisma.");
         // The check usually answers in a second or two, or asks the player to tap a box.
         var timer = setTimeout(function () { removeEventListener("message", onMessage); fail(UNCHECKED); }, 30000);
@@ -210,8 +212,9 @@
           removeEventListener("message", onMessage);
           clearTimeout(timer);
           if (typeof event.data.key === "string") resolve({ key: event.data.key, playerKind: event.data.playerKind === "account" ? "account" : "guest" });
-          // The page may say why it has no key (a preview of a version players don't have yet), instead of the browser check.
-          else fail(typeof event.data.message === "string" && event.data.message ? event.data.message.slice(0, 300) : UNCHECKED);
+          // A preview of a version players don't have yet has no key on purpose, and the page says so, instead of the browser check.
+          else if (event.data.code === "no_online_play_in_preview") failInPreview(typeof event.data.message === "string" && event.data.message ? event.data.message.slice(0, 300) : NO_ONLINE_PLAY_IN_PREVIEW);
+          else fail(UNCHECKED);
         }
         addEventListener("message", onMessage);
         window.parent.postMessage({ type: "zaisma:room-key" }, config.site);

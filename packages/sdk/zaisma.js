@@ -22,9 +22,9 @@
 
   // What each call takes. Anything else is refused, so a misspelled or old option never goes quietly unused.
   var SET_UP_OFF_ZAISMA_OPTIONS = ["gameSlug", "playerToken"];
-  var JOIN_OPTIONS = ["roomCode", "serverUrl", "transport", "isListed", "friendJoinsEnabled", "name", "labels", "joinData", "idleTimeoutSec", "idleCheckEnabled", "isSpectator"];
+  var JOIN_OPTIONS = ["roomCode", "serverUrl", "transport", "isListed", "friendJoinsEnabled", "name", "labels", "joinData", "idleTimeoutSec", "idleCheckEnabled", "isSpectator", "sendCombiningEnabled", "unchangedSkippingEnabled"];
   // quickJoin finds Zaisma rooms, so it takes no serverUrl.
-  var QUICK_JOIN_OPTIONS = ["isListed", "friendJoinsEnabled", "name", "labels", "joinData", "idleTimeoutSec", "idleCheckEnabled", "region"];
+  var QUICK_JOIN_OPTIONS = ["isListed", "friendJoinsEnabled", "name", "labels", "joinData", "idleTimeoutSec", "idleCheckEnabled", "sendCombiningEnabled", "unchangedSkippingEnabled", "region"];
   var LIST_OPTIONS = ["region", "labels"];
   // move.join joins the room the move names, on this room's server and over its transport, as a player: the game server moves only players.
   var MOVE_JOIN_OPTIONS = JOIN_OPTIONS.filter(function (name) { return name !== "roomCode" && name !== "serverUrl" && name !== "transport" && name !== "isSpectator"; });
@@ -70,6 +70,20 @@
   var VERSION_UPDATE_CLOSE_CODE = 4004;
   /** A real-time room's ping from this on shows as a weak connection beside the game. */
   var WEAK_PING_MS = 150;
+  /**
+   * Combining (joinRoom's sendCombiningEnabled, on unless the game turns it off, in a room whose welcome says
+   * canCombineMessages): what a game sends at once leaves as one frame of up to this many messages, and frames
+   * keep under the room's 30 a second with a burst of 60, here 25 with a burst of 40, leaving room for Zaisma's own.
+   * Past it, sends wait and go combined in the next frame instead of coming back too_fast.
+   */
+  var MAXIMUM_COMBINED_MESSAGE_COUNT = 8;
+  var PACED_FRAMES_PER_SEC = 25;
+  var PACED_FRAME_BURST_COUNT = 40;
+  /** The messages inside those frames, under the room's 120 a second with a burst of 240. */
+  var PACED_MESSAGES_PER_SEC = 100;
+  var PACED_MESSAGE_BURST_COUNT = 200;
+  /** An unchanged latest-only send still goes as a datagram this often on the fast lane, since a datagram can be lost. */
+  var UNCHANGED_DATAGRAM_INTERVAL_MS = 250;
   /** A latest-only send waits while the socket holds this much not yet sent, checked every LATEST_CHECK_MS. */
   var BACKED_UP_SIZE_BYTES = 64 * 1024;
   var LATEST_CHECK_MS = 50;
@@ -562,6 +576,19 @@
     // Latest-only sends waiting for the socket to drain, by "<kind>:<latestKey>", least recently replaced first.
     this._slots = new Map();
     this._slotTimer = null;
+    // Combining: whether the game left it on, whether this connection's room takes combined frames (from welcome),
+    // the game messages waiting for the end of this task or for the pace ({ dataText, latestKey }), and the pace's bucket.
+    this._sendCombiningEnabled = setup.sendCombiningEnabled !== false;
+    this._canCombine = false;
+    this._outbox = [];
+    this._isOutboxDue = false;
+    this._outboxTimer = null;
+    this._paceTokenCount = PACED_FRAME_BURST_COUNT;
+    this._messageTokenCount = PACED_MESSAGE_BURST_COUNT;
+    this._pacedAtMs = Date.now();
+    // Unchanged latest-only sends are skipped (unchangedSkippingEnabled): the last one given for each slot on this connection.
+    this._unchangedSkippingEnabled = setup.unchangedSkippingEnabled !== false;
+    this._lastLatest = new Map();
     // Reliable sends waiting for the connection, in order, and whether this outage already said some were dropped.
     this._queue = [];
     this._flushTimer = null;
@@ -741,6 +768,8 @@
 
   /** Send a message to the room if the connection is open. */
   Room.prototype._say = function (message) {
+    // Game messages waiting in the outbox go first, so the room hears everything in the order it was said.
+    if (this._isWelcomed) this._flushOutbox(true);
     if (!this._ws || this._ws.readyState !== 1) return;
     this._ws.send(JSON.stringify(message));
     this._sentAtMs = Date.now();
@@ -823,6 +852,10 @@
         room._probeIntervalSec = typeof message.probeIntervalSec === "number" ? message.probeIntervalSec : null;
         room.spectatorCount = typeof message.spectatorCount === "number" ? message.spectatorCount : 0;
         room.canChat = message.canChat === true && !room.isSpectator;
+        // A room that doesn't say so (an older game server of the game's own) gets one message a frame, as before.
+        room._canCombine = message.canCombineMessages === true;
+        // A new connection: the first latest-only send of each kind goes, whatever went before.
+        room._lastLatest = new Map();
         room._away = room._gone = room._idleSent = room._coming = room._offered = room._isReloadingForVersion = false;
         room.awayReason = null;
         room._isQueueFullSaid = false;
@@ -1039,18 +1072,157 @@
   /**
    * Send a message to the game server. Plain JSON, up to 16 KB. Send input when it changes, not every frame.
    * While the connection isn't open or the player is away, reliable sends wait, in order (up to 60).
-   * { delivery: "latest_only", latestKey } may drop it for a newer one with the same latestKey. False once the room is gone.
+   * { delivery: "latest_only", latestKey } may drop it for a newer one with the same latestKey, and one the same as
+   * the last for its latestKey isn't sent (joinRoom's unchangedSkippingEnabled). What the game sends at once goes in
+   * one frame, kept under the room's limit (joinRoom's sendCombiningEnabled). False once the room is gone.
    */
   Room.prototype.send = function (message, sendOptions) {
     if (this.isSpectator) throw spectatorCannotSend();
     var latestKey = readDelivery(sendOptions, "room.send");
-    var payload = JSON.stringify({ type: "message", data: message });
+    var dataText = JSON.stringify(message);
+    var payload = dataText === undefined ? JSON.stringify({ type: "message" }) : '{"type":"message","data":' + dataText + "}";
     checkSendSize(payload);
     if (this._done) return false;
-    if (latestKey !== null) this._sendLatest("message:" + latestKey, payload);
+    var isCombined = dataText !== undefined && this._combines();
+    if (latestKey !== null) {
+      var slotKey = "message:" + latestKey;
+      if (this._isUnchanged(slotKey, payload)) return true;
+      // On the fast lane a latest-only send goes as a datagram, which is never held for a frame.
+      if (isCombined && !this._ws.sendDatagram) this._putInOutbox(dataText, latestKey);
+      else this._sendLatest(slotKey, payload);
+    } else if (isCombined) this._putInOutbox(dataText, null);
     else this._sendReliable(payload);
     return true;
   };
+
+  /** Whether a game message goes through the outbox now: combining on, the room takes it, and nothing waiting for the connection. */
+  Room.prototype._combines = function () {
+    return this._sendCombiningEnabled && this._canCombine && this._canSend() && !this._queue.length;
+  };
+
+  /**
+   * Whether a latest-only send is the same as the last one given for its slot on this connection, so it needn't go.
+   * Noted either way: what was given last is what goes, now or from its slot. A datagram may be lost, so one repeats now and then.
+   */
+  Room.prototype._isUnchanged = function (slotKey, sentValue) {
+    if (!this._unchangedSkippingEnabled) return false;
+    var nowMs = Date.now();
+    var last = this._lastLatest.get(slotKey);
+    var isDatagram = Boolean(this._ws && this._ws.sendDatagram);
+    if (last && sameValue(last.sentValue, sentValue) && !(last.isDatagram && nowMs - last.givenAtMs >= UNCHANGED_DATAGRAM_INTERVAL_MS)) return true;
+    this._lastLatest.set(slotKey, { sentValue: sentValue, givenAtMs: nowMs, isDatagram: isDatagram });
+    return false;
+  };
+  /** Text or bytes, the same. */
+  function sameValue(first, second) {
+    if (typeof first === "string" || typeof second === "string") return first === second;
+    if (first.byteLength !== second.byteLength) return false;
+    var firstBytes = new Uint8Array(first);
+    var secondBytes = new Uint8Array(second);
+    for (var i = 0; i < firstBytes.length; i++) if (firstBytes[i] !== secondBytes[i]) return false;
+    return true;
+  }
+
+  /** The pace's tokens now, refilled at PACED_FRAMES_PER_SEC up to PACED_FRAME_BURST_COUNT. */
+  Room.prototype._paceTokens = function () {
+    var nowMs = Date.now();
+    var elapsedSec = (nowMs - this._pacedAtMs) / 1000;
+    this._paceTokenCount = Math.min(PACED_FRAME_BURST_COUNT, this._paceTokenCount + elapsedSec * PACED_FRAMES_PER_SEC);
+    this._messageTokenCount = Math.min(PACED_MESSAGE_BURST_COUNT, this._messageTokenCount + elapsedSec * PACED_MESSAGES_PER_SEC);
+    this._pacedAtMs = nowMs;
+    return this._paceTokenCount;
+  };
+  /**
+   * Frames that went, combined or not, and the messages in them: they count against the pace, so bytes and JSON together keep
+   * under the room's limit. Never below empty: what went without waiting (bytes, datagrams) doesn't hold the outbox back for long.
+   */
+  Room.prototype._spendPace = function (frameCount, messageCount) {
+    this._paceTokens();
+    this._paceTokenCount = Math.max(0, this._paceTokenCount - frameCount);
+    this._messageTokenCount = Math.max(0, this._messageTokenCount - (messageCount || 0));
+  };
+
+  /** A game message into the outbox: a latest-only one replaces a waiting one with its latestKey, and reliable ones wait up to 60. */
+  Room.prototype._putInOutbox = function (dataText, latestKey) {
+    var waiting = latestKey === null ? null : this._outbox.filter(function (entry) { return entry.latestKey === latestKey; })[0];
+    if (waiting) waiting.dataText = dataText;
+    else this._outbox.push({ dataText: dataText, latestKey: latestKey });
+    var reliable = this._outbox.filter(function (entry) { return entry.latestKey === null; });
+    if (reliable.length > MAXIMUM_QUEUED_SEND_COUNT) {
+      this._outbox.splice(this._outbox.indexOf(reliable[0]), 1);
+      if (!this._isQueueFullSaid) {
+        this._isQueueFullSaid = true;
+        this._emit("error", { code: "send_queue_full", message: "Up to " + MAXIMUM_QUEUED_SEND_COUNT + " sends wait to go; older ones were dropped. Send less often." });
+      }
+    }
+    if (this._isOutboxDue || this._outboxTimer !== null) return;
+    this._isOutboxDue = true;
+    var room = this;
+    queueMicrotask(function () {
+      room._isOutboxDue = false;
+      room._flushOutbox(false);
+    });
+  };
+
+  /**
+   * The outbox goes: combined into frames of up to 8 messages and 16 KB, as many frames as the pace allows, the rest at its
+   * next token. Forced (before a send that isn't combined, to keep the order), all of it now. With the connection gone,
+   * its messages wait as uncombined sends do.
+   */
+  Room.prototype._flushOutbox = function (isForced) {
+    if (!this._outbox.length) return;
+    var entries;
+    var room = this;
+    if (this._done || !this._canSend() || this._queue.length) {
+      entries = this._outbox;
+      this._outbox = [];
+      this._clearOutboxTimer();
+      if (this._done) return;
+      entries.forEach(function (entry) {
+        var payload = '{"type":"message","data":' + entry.dataText + "}";
+        if (entry.latestKey === null) room._sendReliable(payload);
+        else room._slotLatest("message:" + entry.latestKey, payload);
+      });
+      return;
+    }
+    // Latest-only messages wait in their slots while the socket is backed up, as uncombined ones do.
+    if (this._ws.bufferedAmount >= BACKED_UP_SIZE_BYTES) {
+      this._outbox = this._outbox.filter(function (entry) {
+        if (entry.latestKey === null) return true;
+        room._slotLatest("message:" + entry.latestKey, '{"type":"message","data":' + entry.dataText + "}");
+        return false;
+      });
+    }
+    while (this._outbox.length && (isForced || (this._paceTokens() >= 1 && this._messageTokenCount >= 1))) {
+      var frame = [];
+      var frameSizeBytes = '{"type":"messages","data":[]}'.length;
+      var maximumMessageCount = isForced ? MAXIMUM_COMBINED_MESSAGE_COUNT : Math.min(MAXIMUM_COMBINED_MESSAGE_COUNT, Math.floor(this._messageTokenCount));
+      while (this._outbox.length && frame.length < maximumMessageCount) {
+        var sizeBytes = utf8SizeOf(this._outbox[0].dataText) + 1;
+        if (frame.length && frameSizeBytes + sizeBytes > MAXIMUM_SEND_SIZE_BYTES) break;
+        frame.push(this._outbox.shift().dataText);
+        frameSizeBytes += sizeBytes;
+      }
+      this._ws.send(frame.length === 1 ? '{"type":"message","data":' + frame[0] + "}" : '{"type":"messages","data":[' + frame.join(",") + "]}");
+      this._spendPace(1, frame.length);
+      this._sentAtMs = Date.now();
+    }
+    this._clearOutboxTimer();
+    if (!this._outbox.length) return;
+    this._outboxTimer = setTimeout(function () {
+      room._outboxTimer = null;
+      room._flushOutbox(false);
+    }, Math.max(1, Math.ceil(Math.max((1 - this._paceTokenCount) / PACED_FRAMES_PER_SEC, (1 - this._messageTokenCount) / PACED_MESSAGES_PER_SEC) * 1000)));
+  };
+  Room.prototype._clearOutboxTimer = function () {
+    if (this._outboxTimer === null) return;
+    clearTimeout(this._outboxTimer);
+    this._outboxTimer = null;
+  };
+  /** Text's size in UTF-8, measured only when it could matter. */
+  function utf8SizeOf(text) {
+    return text.length * 3 <= 1024 ? text.length * 3 : new TextEncoder().encode(text).length;
+  }
 
   /**
    * Send bytes to the game server (its onBytes), like a compact input: an ArrayBuffer or any typed array,
@@ -1064,8 +1236,10 @@
     if (this._done) return false;
     // A copy: the game may reuse its buffer while this one waits.
     var copy = ArrayBuffer.isView(bytes) ? bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) : bytes.slice(0);
-    if (latestKey !== null) this._sendLatest("bytes:" + latestKey, copy);
-    else this._sendReliable(copy);
+    if (latestKey !== null) {
+      if (this._isUnchanged("bytes:" + latestKey, copy)) return true;
+      this._sendLatest("bytes:" + latestKey, copy);
+    } else this._sendReliable(copy);
     return true;
   };
 
@@ -1081,8 +1255,11 @@
 
   /** A reliable send: now, or in order once the connection is open again, dropping the oldest past 60. */
   Room.prototype._sendReliable = function (payload) {
+    // Game messages waiting in the outbox go first, so everything keeps its order.
+    this._flushOutbox(true);
     if (this._canSend() && !this._queue.length) {
       this._ws.send(payload);
+      this._spendPace(1);
       this._sentAtMs = Date.now();
       return;
     }
@@ -1099,7 +1276,9 @@
     var room = this;
     var ws = this._ws;
     function send(sendCount) {
-      room._queue.splice(0, sendCount).forEach(function (payload) { ws.send(payload); });
+      var sent = room._queue.splice(0, sendCount);
+      sent.forEach(function (payload) { ws.send(payload); });
+      room._spendPace(sent.length);
       room._sentAtMs = Date.now();
     }
     send(FLUSH_NOW_COUNT);
@@ -1130,20 +1309,32 @@
 
   /** A latest-only send: now, after anything still waiting, or into its slot while the socket is backed up. */
   Room.prototype._sendLatest = function (slotKey, payload) {
+    this._flushOutbox(true);
     // On the fast lane, a datagram: a late one is lost rather than waited for, so it skips the slots.
     if (this._canSend() && !this._queue.length && this._ws.sendDatagram && this._ws.sendDatagram(payload)) {
+      this._spendPace(1);
       this._sentAtMs = Date.now();
       return;
     }
     if (this._canSend() && !this._queue.length && !(this._ws.bufferedAmount >= BACKED_UP_SIZE_BYTES)) {
       this._sendWaiting();
       this._ws.send(payload);
+      this._spendPace(1);
       this._sentAtMs = Date.now();
       return;
     }
+    this._slotLatest(slotKey, payload);
+  };
+  /** A latest-only send into its slot, to go once the socket drains: the slot keeps only the newest. */
+  Room.prototype._slotLatest = function (slotKey, payload) {
     this._slots.delete(slotKey);
     this._slots.set(slotKey, payload);
-    if (this._slots.size > MAXIMUM_LATEST_ONLY_SLOT_COUNT) this._slots.delete(this._slots.keys().next().value);
+    if (this._slots.size > MAXIMUM_LATEST_ONLY_SLOT_COUNT) {
+      var evictedKey = this._slots.keys().next().value;
+      this._slots.delete(evictedKey);
+      // It never went: the next send with its latestKey goes, the same or not.
+      this._lastLatest.delete(evictedKey);
+    }
     if (this._slotTimer === null) {
       var room = this;
       this._slotTimer = setInterval(function () {
@@ -1158,6 +1349,7 @@
     if (!this._slots.size || !this._canSend() || this._queue.length) return;
     var ws = this._ws;
     this._slots.forEach(function (payload) { ws.send(payload); });
+    this._spendPace(this._slots.size);
     this._slots.clear();
     this._sentAtMs = Date.now();
   };
@@ -1346,6 +1538,8 @@
     this._views = [];
     this._slots.clear();
     this._queue = [];
+    this._outbox = [];
+    this._clearOutboxTimer();
     this._sayRoomToPage();
     this._setConnectionStatus("connecting");
     this._emit("moved", { roomCode: roomCode, fromRoomCode: fromRoomCode });
@@ -1618,6 +1812,8 @@
     if (!this._done) left(this);
     this._done = true;
     this._queue = [];
+    this._outbox = [];
+    this._clearOutboxTimer();
     this._failChats();
     if (this._ws) this._ws.close(1000, "Left");
   };
@@ -1637,6 +1833,8 @@
     var isOffZaisma = !config.rooms;
     var idleTimeoutSec = joinOptions.idleTimeoutSec;
     if (idleTimeoutSec !== undefined && !(typeof idleTimeoutSec === "number" && idleTimeoutSec >= MINIMUM_IDLE_TIMEOUT_SEC && idleTimeoutSec <= MAXIMUM_IDLE_TIMEOUT_SEC)) return Promise.reject(codedError("bad_idle_timeout", "idleTimeoutSec runs from " + MINIMUM_IDLE_TIMEOUT_SEC + " to " + MAXIMUM_IDLE_TIMEOUT_SEC + "."));
+    var badSwitch = ["sendCombiningEnabled", "unchangedSkippingEnabled"].filter(function (name) { return joinOptions[name] !== undefined && typeof joinOptions[name] !== "boolean"; })[0];
+    if (badSwitch) return Promise.reject(codedError("unknown_option", badSwitch + " is " + JSON.stringify(joinOptions[badSwitch]) + ". Give true (the default) or false."));
     if (serverUrl && !SERVER_URL.test(serverUrl)) return Promise.reject(codedError("bad_server_url", "serverUrl takes a full address starting with wss://, ws://, https:// or http://, like \"wss://play.example.com\"."));
     if (joinOptions.transport !== undefined && TRANSPORTS.indexOf(joinOptions.transport) === -1) return Promise.reject(codedError("bad_transport", "transport is " + JSON.stringify(joinOptions.transport) + '. Give "websocket" (the default) or "webtransport" (the fast lane to your own server).'));
     if (roomCode && !ROOM_CODE.test(roomCode)) return Promise.reject(codedError("bad_room_code", JSON.stringify(roomCode) + " isn't a room code: room codes are six characters like \"K7Q2MX\", from 2 to 9 and A to Z without I or O."));
@@ -1663,6 +1861,8 @@
         labels: joinOptions.labels,
         joinData: joinOptions.joinData,
         clientIdle: clientIdle(joinOptions),
+        sendCombiningEnabled: joinOptions.sendCombiningEnabled,
+        unchangedSkippingEnabled: joinOptions.unchangedSkippingEnabled,
         serverUrl: serverUrl,
         isSpectator: joinOptions.isSpectator === true,
       });

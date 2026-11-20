@@ -1129,7 +1129,21 @@ interface JoinOptions {
    * @example
    * const room = await Zaisma.joinRoom({ isSpectator: Zaisma.rooms.isLinkedAsSpectator });
    */
-  isSpectator?: boolean;
+  isSpectator?: boolean;    /**
+   * true (the default): what the game sends at once (in one frame of its loop, say) goes to the room as one
+   * message of up to 8, and sends keep under the room's 30 a second by themselves: past that, they wait a few
+   * milliseconds and go together instead of coming back "too_fast". Each still reaches the game server's
+   * onMessage on its own, in order. A room is billed for each message it gets, so this costs the game less.
+   * Rooms on your own server combine only when their game server says it can (game server 1.40 and later).
+   * false: every send goes alone and at once, as it's made.
+   */
+  sendCombiningEnabled?: boolean;
+  /**
+   * true (the default): a { delivery: "latest_only" } send that's the same as the last one with its latestKey
+   * isn't sent, since the room already has it; the first after a reconnect always goes. Reliable sends always go.
+   * false: send every one, as when the game server expects a steady stream.
+   */
+  unchangedSkippingEnabled?: boolean;
 }
 ```
 
@@ -1436,7 +1450,9 @@ interface Room {
    * 30 a second at most. Send input when it changes, not every frame. While connectionStatus isn't "open"
    * or the player is away, reliable sends wait and go in order once the room is back, up to 60: past that
    * the oldest is dropped, and an "error" event says "send_queue_full" once. With
-   * { delivery: "latest_only", latestKey }, a message may be dropped for a newer one (SendOptions). A
+   * { delivery: "latest_only", latestKey }, a message may be dropped for a newer one (SendOptions), and one
+   * the same as the last with its latestKey isn't sent (JoinOptions.unchangedSkippingEnabled). What the game
+   * sends at once goes as one message (JoinOptions.sendCombiningEnabled). A
    * spectator can't send: it throws error.code "spectator_cannot_send". Returns false only when the room
    * is gone (ended, kicked or left), so nothing will ever send.
    *

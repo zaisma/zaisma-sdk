@@ -949,6 +949,11 @@ export const ROOM_LIMITS = {
    */
   maximumGameMessagesPerSec: 30,
   maximumGameMessageBurstCount: 60,
+  /** Game messages one combined frame ({ type: "messages" }) carries at most: the frame takes one of the 30 a second. */
+  maximumCombinedMessageCount: 8,
+  /** The messages inside combined frames, per second per player, with a burst: what bounds a player's onMessage calls. */
+  maximumCombinedGameMessagesPerSec: 120,
+  maximumCombinedGameMessageBurstCount: 240,
   /** The idle check's default and range (idleTimeoutSec, joinRoom({ idleTimeoutSec })). */
   defaultIdleTimeoutSec: 600,
   minimumIdleTimeoutSec: 30,
@@ -1132,7 +1137,9 @@ export interface RoomSettings {
  * Clients send {type: "hello", protocolVersionNumber, pass, joinData?, room?: {isListed?, friendJoinsEnabled?, name?, labels?}, idleTimeoutSec?,
  * idleCheckEnabled?} first (ClientMessage; joinData is for canJoin and onJoin; the room's settings only count from
  * the player who makes it, and a room is listed only when its first player's hello says isListed: true;
- * the idle fields only where the game server's idleCheck is "client"), then {type: "message", data}.
+ * the idle fields only where the game server's idleCheck is "client"), then {type: "message", data}, or, where
+ * welcome says canCombineMessages, {type: "messages", data: [2 to 8 messages]}: what the game sent at once, each
+ * reaching onMessage in order, the frame counting once toward the 30 a second and each message toward 120 a second.
  * With hostControlsEnabled, the host may also send {type: "room", room: {isListed?, isOpen?,
  * friendJoinsEnabled?, name?, labels?}} and {type: "kick", playerId, keepOut?}. hostPlayerId is null without host controls.
  *
@@ -1218,6 +1225,8 @@ export type ServerMessage =
       probeIntervalSec: number | null;
       protocolVersionNumber: number;
       canChat: boolean;
+      /** The room takes { type: "messages", data: [...] }: the SDK combines what a game sends at once only where this says so. */
+      canCombineMessages: boolean;
     }
   | { type: "probe"; probeNumber: number; serverTimeMs: number; pingDurationMs: number | null }
   | { type: "ending"; endsAt: string }
@@ -1697,7 +1706,7 @@ const wirePlayers = { type: "array", items: looseObject } as const;
 const WIRE_DATA = {} as const;
 export const ROOM_FRAME: Readonly<Record<string, unknown>> = {
   anyOf: [
-    frameOf("welcome", { me: looseObject, isSpectator: wireYesOrNo, players: wirePlayers, room: looseObject, spectatorCount: wireNumber, hostPlayerId: wireNullable("string"), awayChecks: looseObject, endsAt: wireNullable("string"), probeIntervalSec: wireNullable("number"), protocolVersionNumber: wireNumber, canChat: wireYesOrNo }),
+    frameOf("welcome", { me: looseObject, isSpectator: wireYesOrNo, players: wirePlayers, room: looseObject, spectatorCount: wireNumber, hostPlayerId: wireNullable("string"), awayChecks: looseObject, endsAt: wireNullable("string"), probeIntervalSec: wireNullable("number"), protocolVersionNumber: wireNumber, canChat: wireYesOrNo, canCombineMessages: wireYesOrNo }),
     frameOf("probe", { probeNumber: wireNumber, serverTimeMs: wireNumber, pingDurationMs: wireNullable("number") }),
     frameOf("ending", { endsAt: wireText }),
     frameOf("ending_cancelled"),
@@ -1787,6 +1796,7 @@ export const ROOM_MESSAGE_DOORS = {
   shown: roomMessage("room_player"),
   back: roomMessage("room_player", { joinData: gameData(ROOM_LIMITS.maximumJoinDataSizeBytes * 2), ...IDLE_FIELDS }),
   message: roomMessage("room_player", { data: gameData(ROOM_LIMITS.maximumGameMessageSizeBytes) }),
+  messages: roomMessage("room_player", { data: listOf(gameData(ROOM_LIMITS.maximumGameMessageSizeBytes), ROOM_LIMITS.maximumCombinedMessageCount, 2) }, ["data"]),
   bytes: {
     whoMayCall: "room_player",
     reaches: "room",
@@ -1985,6 +1995,7 @@ export class RoomCore<S = any> {
   /** When this room took room messages, within the last second (ROOM_MESSAGE_LIMITS.maximumReceivedRoomMessagesPerSec). */
   private roomReceivedAtMs: number[] = [];
   private buckets = new Map<string, { tokenCount: number; filledAtMs: number }>();
+  private combinedBuckets = new Map<string, { tokenCount: number; filledAtMs: number }>();
   /** Probes this room has sent, to every player: each probe's number. */
   private probeCount = 0;
   /** What each player was last sent of the state (stateSyncEnabled), unless the game server runs state sync itself (SYNCS_STATE). */
@@ -2767,7 +2778,7 @@ export class RoomCore<S = any> {
     const probeIntervalSec = this.ticking ? ROOM_TUNING.probeIntervalSec : null;
     this.sendText(
       player.id,
-      JSON.stringify({ type: "welcome", me: shownPlayer(player), isSpectator: false, players: this.list(), room: this.settings(), spectatorCount: this.spectators.size, hostPlayerId: this.hostPlayerId, awayChecks: this.checks(player.id), endsAt: this.endsAt, probeIntervalSec, protocolVersionNumber: PROTOCOL_VERSION_NUMBER, canChat: this.canChat(player.id) } satisfies ServerMessage),
+      JSON.stringify({ type: "welcome", me: shownPlayer(player), isSpectator: false, players: this.list(), room: this.settings(), spectatorCount: this.spectators.size, hostPlayerId: this.hostPlayerId, awayChecks: this.checks(player.id), endsAt: this.endsAt, probeIntervalSec, protocolVersionNumber: PROTOCOL_VERSION_NUMBER, canChat: this.canChat(player.id), canCombineMessages: true } satisfies ServerMessage),
     );
     // Every room gets a first ping and clock sample right away, ticking or not.
     this.probe(player.id);
@@ -2805,7 +2816,7 @@ export class RoomCore<S = any> {
     const probeIntervalSec = this.ticking ? ROOM_TUNING.probeIntervalSec : null;
     this.sendText(
       spectator.id,
-      JSON.stringify({ type: "welcome", me: shownPlayer(spectator), isSpectator: true, players: this.list(), room: this.settings(), spectatorCount: this.spectators.size, hostPlayerId: this.hostPlayerId, awayChecks: { idleTimeoutSec: null, hiddenTimeoutSec: null }, endsAt: this.endsAt, probeIntervalSec, protocolVersionNumber: PROTOCOL_VERSION_NUMBER, canChat: false } satisfies ServerMessage),
+      JSON.stringify({ type: "welcome", me: shownPlayer(spectator), isSpectator: true, players: this.list(), room: this.settings(), spectatorCount: this.spectators.size, hostPlayerId: this.hostPlayerId, awayChecks: { idleTimeoutSec: null, hiddenTimeoutSec: null }, endsAt: this.endsAt, probeIntervalSec, protocolVersionNumber: PROTOCOL_VERSION_NUMBER, canChat: false, canCombineMessages: true } satisfies ServerMessage),
     );
     this.probe(spectator.id);
     // A new connection starts with nothing of the state: a full copy comes with the next round.
@@ -2891,6 +2902,7 @@ export class RoomCore<S = any> {
     this.reconnectUntilMs.delete(playerId);
     this.presence.delete(playerId);
     this.buckets.delete(playerId);
+    this.combinedBuckets.delete(playerId);
     this.listingChanged = true;
     this.dirty = true;
   }
@@ -3007,6 +3019,29 @@ export class RoomCore<S = any> {
    * game has been hidden too long in a real-time room, walk away; held seats that ran out are freed,
    * and those players' connections close.
    */
+  /**
+   * When sweep next has something to do, in epoch milliseconds, or null: the earliest idle walk-away, held or
+   * expected seat running out, probe answer timing out or reconnect running out. A host that sleeps between
+   * sweeps (Zaisma's rooms) wakes for this instead of on a fixed timer. A stale ping waits for the next wake.
+   */
+  nextSweepAtMs(): number | null {
+    if (this.ended) return null;
+    const dueAtMs: number[] = [];
+    const reconnectAtMs = this.nextReconnectDeadlineMs();
+    if (reconnectAtMs !== null) dueAtMs.push(reconnectAtMs);
+    for (const [id, presence] of this.presence) {
+      const oldestProbe = presence.unansweredProbes.values().next().value;
+      if (oldestProbe) dueAtMs.push(oldestProbe.sentAtMs + ROOM_TUNING.probeAnswerTimeoutSec * 1000);
+      if (this.kept.has(id) || this.spectators.has(id)) continue;
+      const idleTimeoutSec = this.idleTimeoutSecFor(id);
+      if (idleTimeoutSec !== null) dueAtMs.push(presence.seenAtMs + idleTimeoutSec * 1000 + IDLE_ASK_MS + IDLE_GRACE_MS);
+      if (this.ticking && presence.hiddenAtMs !== undefined) dueAtMs.push(presence.hiddenAtMs + ROOM_LIMITS.hiddenTimeoutSec * 1000);
+    }
+    for (const expected of this.expected.values()) dueAtMs.push(expected.untilMs);
+    for (const held of this.held.values()) dueAtMs.push(held.untilMs);
+    return dueAtMs.length ? Math.min(...dueAtMs) : null;
+  }
+
   sweep(): void {
     if (this.ended) return;
     this.expireReconnects();
@@ -3059,7 +3094,10 @@ export class RoomCore<S = any> {
     // A probe answer is automatic, not the player's input: it isn't counted, takes no token and doesn't count as seen.
     if (message.type === "probe_answer" && this.answer(playerId, message.probeNumber)) return null;
     this.messageCount++;
-    this.countTraffic("inbound", message.type === "message" ? messageTypeOf(message.data) : typeof message.type === "string" ? ZAISMA_MESSAGE_TYPE : NO_MESSAGE_TYPE, 1, sizeBytes);
+    const combined = message.type === "messages" && Array.isArray(message.data) && message.data.length <= ROOM_LIMITS.maximumCombinedMessageCount ? (message.data as unknown[]) : null;
+    // A combined frame is billed once, and each message in it counts by its own type, sharing the frame's size.
+    if (combined && combined.length) for (const messageData of combined) this.countTraffic("inbound", messageTypeOf(messageData), 1, Math.round(sizeBytes / combined.length));
+    else this.countTraffic("inbound", message.type === "message" ? messageTypeOf(message.data) : typeof message.type === "string" ? ZAISMA_MESSAGE_TYPE : NO_MESSAGE_TYPE, 1, sizeBytes);
     if (isTooBig) return "too_big";
     if (!this.take(playerId)) return "too_fast";
     if (!isParsed) return "bad_message";
@@ -3093,6 +3131,15 @@ export class RoomCore<S = any> {
         return this.back(playerId);
       case "message":
         this.input(() => this.server.onMessage?.(this.state, player!, this.api, message.data), "onMessage");
+        return null;
+      case "messages":
+        if (!this.takeCombined(playerId, (message.data as unknown[]).length)) return "too_fast";
+        // Several messages the player's game sent at once, in one frame: each reaches onMessage in order, as if sent alone.
+        for (const messageData of message.data as unknown[]) {
+          // A message before it may have ended the match, or kicked the player or walked them away: the rest go no further, as they wouldn't alone.
+          if (this.ended || !this.players.has(playerId) || this.kept.has(playerId)) break;
+          this.input(() => this.server.onMessage?.(this.state, player!, this.api, messageData), "onMessage");
+        }
         return null;
       case "chat":
         // The room's host takes chat before it gets here (readChatMessage); a host that doesn't, doesn't take chat.
@@ -3798,6 +3845,18 @@ export class RoomCore<S = any> {
   }
 
   /** Token bucket per player: a short burst is fine, a flood is dropped. */
+  /** The second bucket, for the messages inside combined frames: each takes one, so combining never lifts how often onMessage runs past its own limit. */
+  private takeCombined(playerId: string, messageCount: number): boolean {
+    const nowMs = this.now();
+    const bucket = this.combinedBuckets.get(playerId) ?? { tokenCount: ROOM_LIMITS.maximumCombinedGameMessageBurstCount, filledAtMs: nowMs };
+    bucket.tokenCount = Math.min(ROOM_LIMITS.maximumCombinedGameMessageBurstCount, bucket.tokenCount + ((nowMs - bucket.filledAtMs) / 1000) * ROOM_LIMITS.maximumCombinedGameMessagesPerSec);
+    bucket.filledAtMs = nowMs;
+    this.combinedBuckets.set(playerId, bucket);
+    if (bucket.tokenCount < messageCount) return false;
+    bucket.tokenCount -= messageCount;
+    return true;
+  }
+
   private take(playerId: string): boolean {
     const nowMs = this.now();
     const bucket = this.buckets.get(playerId) ?? { tokenCount: ROOM_LIMITS.maximumGameMessageBurstCount, filledAtMs: nowMs };

@@ -9794,6 +9794,11 @@ var REVIEW_LIMITS = {
   readerChunkOverlapCharacterCount: 2e3,
   /** About 19 MB of text: past it, a person looks (too_much_code). */
   maximumReaderChunkCount: 80,
+  /**
+   * A reader whose answer was cut off (too many items for its answer's length) reads its piece again in halves,
+   * down to pieces of about this size; one that still can't answer there holds the version (ai_review_failed).
+   */
+  minimumSplitReaderChunkCharacterCount: 4e4,
   /** Reader calls at a time. */
   maximumParallelReaderCount: 6,
   /** The largest pictures between 2 KB and 1 MB are read, up to this many. */
@@ -32642,6 +32647,9 @@ var PLAY_COUNTER_SCRIPT = pageScript("play-counter", `// The key to player passe
 // and whose passes it gives: the signed-in account's, or a guest's. A guest who signs in while playing gets the account's instead.
 let gotKey;
 let roomKey =new Promise((done) => (gotKey = (r) => done(r && r.key ? { key: r.key, playerKind: r.playerKind } : null)));
+// Once Play has started: a fresh key, for a game whose last one gave no pass (the check refused it, or its passes ran out), as roomKey.
+let askRoomKeyAgain = null;
+const freshRoomKey = (ask) => { roomKey = new Promise((done) => (gotKey = (r) => done(r && r.key ? { key: r.key, playerKind: r.playerKind } : null))); ask(); return roomKey; };
 const countPlay = (() => {
 const api = "/api/plays/" + gamePage.slug, KEY = "zaisma:plays", SLUG = gamePage.slug, SITE_KEY = gamePage.turnstile_site_key, TESTER = gamePage.tester_token || "", OWN_PREVIEW = gamePage.is_own_preview === true;
 const post = (body) => fetch(api, { method: "POST", body: JSON.stringify(body), keepalive: true }).then((r) => (r.status === 200 ? r.json() : null)).catch(() => null);
@@ -32657,21 +32665,21 @@ const save = (mine) => {
 };
 // Cloudflare's invisible check starts as the page opens, so its answer is ready by the time the player
 // taps Play. Each answer works once and lasts 5 minutes; Cloudflare renews it while the page stays open.
-let answer = null, answeredAt = 0, widget = null, broken = !SITE_KEY, failureCount = 0, hasGivenUp = false;
+let answer = null, answeredAt = 0, widget = null, broken = !SITE_KEY, failureCount = 0, isAsking = Boolean(SITE_KEY);
 const waiting = [];
 const settle = () => waiting.splice(0).forEach((w) => w());
-const answered = (t) => { answer = t || null; answeredAt = Date.now(); failureCount = 0; hasGivenUp = false; settle(); };
+const answered = (t) => { answer = t || null; answeredAt = Date.now(); failureCount = 0; isAsking = false; settle(); };
 // A failed check (Cloudflare's 600010 and the like) is often a passing hiccup: Cloudflare says to try again, so the page does,
 // twice, a second apart, before it tells whoever waits that there's no answer. Handled here, so Cloudflare logs no error.
 const failed = () => {
   if (widget !== null && ++failureCount <= ${PLAY_CHECK_RETRY_COUNT}) setTimeout(() => { try { turnstile.reset(widget); } catch { settle(); } }, 1000);
-  else { failureCount = 0; hasGivenUp = true; settle(); }
+  else { failureCount = 0; isAsking = false; settle(); }
   return true;
 };
 if (SITE_KEY) {
   const go = () => {
     try {
-      widget = turnstile.render(document.getElementById("play-check"), { sitekey: SITE_KEY, action: "play", appearance: "interaction-only", "refresh-expired": "auto", retry: "never", callback: answered, "expired-callback": () => (answer = null), "error-callback": failed, "timeout-callback": settle });
+      widget = turnstile.render(document.getElementById("play-check"), { sitekey: SITE_KEY, action: "play", appearance: "interaction-only", "refresh-expired": "auto", retry: "never", callback: answered, "expired-callback": () => { answer = null; isAsking = true; }, "error-callback": failed, "timeout-callback": () => { isAsking = false; settle(); } });
     } catch { broken = true; settle(); }
   };
   if (window.turnstile) go();
@@ -32689,8 +32697,8 @@ const check = () => new Promise((done) => {
   const take = () => { const t = answer; answer = null; done(t); };
   if (answer && Date.now() - answeredAt < 240000) return take();
   if (broken) return done(null);
-  // An answer about to run out, or a check that gave up on an earlier try: ask again.
-  if ((answer || hasGivenUp) && widget !== null) { answer = null; hasGivenUp = false; try { turnstile.reset(widget); } catch {} }
+  // An answer about to run out, or none on its way (each answer works once, so a second key needs a new one): ask Cloudflare again.
+  if ((answer || !isAsking) && widget !== null) { answer = null; isAsking = true; try { turnstile.reset(widget); } catch {} }
   const timer = setTimeout(() => done(null), 20000);
   waiting.push(() => { clearTimeout(timer); answer ? take() : done(null); });
 });
@@ -32748,6 +32756,10 @@ const tick = () => {
   if (onScreen() - sent >= 300000) flush(document.hidden);
 };
 return () => {
+  // A key asked for again only gets the key: never another start, ticket or count.
+  if (TESTER) askRoomKeyAgain = () => freshRoomKey(() => check().then((token) => post({ tester: TESTER, token, tlast: day() })).then(gotKey));
+  else if (OWN_PREVIEW) askRoomKeyAgain = () => freshRoomKey(() => post({ own_preview: true }).then(gotKey));
+  else askRoomKeyAgain = () => freshRoomKey(() => check().then((token) => post({ token, is_room_key_retry: true })).then(gotKey));
   // A tester link's play is never counted: the check is only for multiplayer.
   if (TESTER) return check().then((token) => post({ tester: TESTER, token, tlast: (load()[SLUG] || {}).tlast || null })).then((answer) => { save({ ...(load()[SLUG] || {}), tlast: day() }); return gotKey(answer); });
   // The developer's own preview: never counted or kept in this browser's plays, and no check: its key comes with the developer's sign-in.
@@ -60192,7 +60204,9 @@ addEventListener("message", (e) => {
     // code of its own (the SDK's no_online_play_in_preview), so its developer doesn't chase the browser.
     const why = gamePage.is_preview && !gamePage.is_own_preview ? { code: "no_online_play_in_preview", message: "Online play is off in a preview of a version players don't have yet, so a test build never reaches live rooms. Test online play with npx @zaisma/cli play-locally, or publish the version and play it through a tester link (add_tester_link)." } : null;
     const reply = (given) => frame.contentWindow.postMessage({ type: "zaisma:room-key", key: given ? given.key : null, playerKind: given ? given.playerKind : null, ...(given || !why ? {} : why) }, gameOrigin);
-    typeof roomKey === "undefined" ? reply(null) : roomKey.then(reply);
+    // The game's last key gave no pass (refused, spent or run out): a fresh one, once Play has started, instead of the same again.
+    if (d.is_again === true && typeof askRoomKeyAgain === "function") askRoomKeyAgain().then(reply);
+    else typeof roomKey === "undefined" ? reply(null) : roomKey.then(reply);
   }
   // The game asks a guest to sign in (Zaisma.player.signIn).
   if (d && d.type === "zaisma:sign-in" && window.askSignIn) askSignIn();

@@ -205,6 +205,8 @@
   var passKey = "zaisma:pass:" + config.game;
   var passPromise = null;
   var keyPromise = null;
+  // The page's last key gave no pass (refused, spent or run out): the next ask says so, and the page gets a fresh one.
+  var isKeySpent = false;
   var UNCHECKED = "Zaisma couldn't check this browser, so it can't play online. Reload the game to try again.";
   var NO_ONLINE_PLAY_IN_PREVIEW = "Online play is off in a preview of a version players don't have yet. Test online play with npx @zaisma/cli play-locally, or publish the version and play it through a tester link.";
 
@@ -215,6 +217,7 @@
    */
   function roomKey() {
     if (!keyPromise) {
+      var isAgain = isKeySpent;
       keyPromise = new Promise(function (resolve, reject) {
         function fail(message) { reject(codedError("unchecked", message)); }
         function failInPreview(message) { reject(codedError("no_online_play_in_preview", message)); }
@@ -231,10 +234,22 @@
           else fail(UNCHECKED);
         }
         addEventListener("message", onMessage);
-        window.parent.postMessage({ type: "zaisma:room-key" }, config.site);
+        window.parent.postMessage(isAgain ? { type: "zaisma:room-key", is_again: true } : { type: "zaisma:room-key" }, config.site);
       });
+      // A key that didn't come isn't kept: the next join asks the page again, so one failed check doesn't hold the tab until a reload.
+      keyPromise.catch(function () { keyPromise = null; isKeySpent = true; });
     }
     return keyPromise;
+  }
+
+  /** A pass from the page's key; a key Zaisma no longer takes (its passes spent, or run out) is swapped for a fresh one, once. */
+  function passFromKey(given, isRetry) {
+    return post("/v1/pass", { gameSlug: config.game, roomKey: given.key }).catch(function (error) {
+      if (isRetry || !error || error.code !== "unchecked") throw error;
+      keyPromise = null;
+      isKeySpent = true;
+      return roomKey().then(function (fresh) { return passFromKey(fresh, true); });
+    });
   }
 
   /**
@@ -302,7 +317,8 @@
         // and blocks as they are now; the account's player ID is the same either way.
         var kept = keptPass();
         if (kept && kept.kind === "guest" && given.playerKind === "guest") return kept;
-        return post("/v1/pass", { gameSlug: config.game, roomKey: given.key }).then(function (answer) {
+        return passFromKey(given, false).then(function (answer) {
+          isKeySpent = false;
           var mine = { id: answer.player.id, name: answer.player.name, kind: answer.player.kind, pass: answer.pass, expiresAt: answer.expiresAt };
           keptPlayShare = answer.playShare || null;
           try {

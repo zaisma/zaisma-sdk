@@ -3,7 +3,7 @@
 // Docs: https://github.com/zaisma/zaisma-sdk/blob/main/docs/DEVELOPER-API.md#the-upload-command
 
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream, readFileSync } from "node:fs";
+import { createReadStream, createWriteStream, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, extname, join, posix, relative, resolve, sep } from "node:path";
@@ -19,6 +19,53 @@ const API = (process.env.ZAISMA_API || "https://zaisma.com").replace(/\/+$/, "")
 const KEY = process.env.ZAISMA_KEY || "";
 /** This command's version, sent as its user agent so a game's history can say "the upload command 0.10.0". */
 const CLI_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
+
+/** How this copy was installed, from where its file sits: through npx, in a project, globally, or a source checkout (which checks nothing). */
+function cliInstallKind() {
+  let path = fileURLToPath(import.meta.url);
+  try {
+    path = realpathSync(path);
+  } catch {}
+  path = path.replaceAll("\\", "/");
+  if (path.includes("/_npx/")) return "npx";
+  // A project has its package.json beside its outermost node_modules; npm's global folder (lib/ under its prefix) has none.
+  const index = path.indexOf("/node_modules/");
+  if (index === -1) return "checkout";
+  try {
+    readFileSync(`${path.slice(0, index)}/package.json`);
+    return "project";
+  } catch {
+    return "global";
+  }
+}
+
+/** How long a command waits for npm to say whether a newer CLI is out. */
+const UPDATE_CHECK_TIMEOUT_MS = 3000;
+/** How long upload waits for that answer once it's done. */
+const UPDATE_CHECK_GRACE_MS = 300;
+
+/**
+ * One line when npm has a newer CLI than this one, or null: this is the latest, npm didn't answer before signal stopped it, or
+ * this is a source checkout. What to do follows from how it was installed.
+ */
+async function newerCliLine(installKind, signal) {
+  if (installKind === "checkout") return null;
+  const registryUrl = (process.env.npm_config_registry || "https://registry.npmjs.org").replace(/\/+$/, "");
+  let latestVersion;
+  try {
+    const response = await fetch(`${registryUrl}/@zaisma%2fcli/latest`, { signal });
+    latestVersion = response.ok ? (await response.json()).version : null;
+  } catch {
+    return null;
+  }
+  const numbers = (version) => /^(\d+)\.(\d+)\.(\d+)$/.exec(version ?? "")?.slice(1).map(Number);
+  const [latest, own] = [numbers(latestVersion), numbers(CLI_VERSION)];
+  const index = latest && own ? latest.findIndex((partNumber, i) => partNumber !== own[i]) : -1;
+  if (index === -1 || latest[index] < own[index]) return null;
+  if (installKind === "project") return `@zaisma/cli ${latestVersion} is out, and this project has ${CLI_VERSION}: run npm install @zaisma/cli@latest to move up.`;
+  if (installKind === "global") return `@zaisma/cli ${latestVersion} is out, and this computer has ${CLI_VERSION}: run npm install -g @zaisma/cli@latest to move up.`;
+  return `@zaisma/cli ${latestVersion} is out (this is ${CLI_VERSION}): npx @zaisma/cli runs it from the next command on.`;
+}
 /** Files bigger than this go in parts; the server says how big each part is. */
 const DIRECT_BYTES = 95 * 1024 * 1024;
 // .zaisma-local held what play-locally keeps (its keys, saves and database) before it moved out of the game's folder: never sent.
@@ -2209,7 +2256,24 @@ async function run({ command, values, flags, globalFlags, rest }) {
   if (command === "check") return checkFolder(values, flags);
   if (command === "play-locally") return playLocally(values, flags);
   if (command === "export") return exportGame(values, flags);
-  if (command === "upload") return upload(values, flags);
+  if (command === "upload") {
+    // A newer CLI on npm: one line on stderr once the upload is done, never under --json.
+    // A registry that hangs gets UPDATE_CHECK_GRACE_MS after the upload, never the whole timeout.
+    const stopCheck = new AbortController();
+    const timeoutTimer = setTimeout(() => stopCheck.abort(), UPDATE_CHECK_TIMEOUT_MS);
+    const newerLine = isJson ? null : newerCliLine(cliInstallKind(), stopCheck.signal);
+    const uploadExit = await upload(values, flags).catch((error) => {
+      clearTimeout(timeoutTimer);
+      stopCheck.abort();
+      throw error;
+    });
+    const graceTimer = setTimeout(() => stopCheck.abort(), UPDATE_CHECK_GRACE_MS);
+    const line = await newerLine;
+    clearTimeout(graceTimer);
+    clearTimeout(timeoutTimer);
+    if (line) console.error(line);
+    return uploadExit;
+  }
   if (command === "shader") return sendShader(values, flags);
   if (command === "versions") {
     const answer = await api("GET", `/games/${values.slug}`);
@@ -2384,7 +2448,8 @@ async function playLocally(values, flags) {
   const [file, list] = local ? [process.execPath, [local, "play-locally", ...given]] : npxScript ? [process.execPath, [npxScript, ...npxArguments]] : ["npx", npxArguments];
   let child;
   try {
-    child = spawn(file, list, { stdio: "inherit" });
+    // The game server's play-locally checks npm for a newer CLI too, and says so with its own (ZAISMA_CLI_VERSION, ZAISMA_CLI_INSTALL_KIND).
+    child = spawn(file, list, { stdio: "inherit", env: { ...process.env, ZAISMA_CLI_VERSION: CLI_VERSION, ZAISMA_CLI_INSTALL_KIND: cliInstallKind() } });
   } catch {
     refuse("game_server_not_run", { message: "npx couldn't run @zaisma/game-server.", fix: "Check that Node 22.18 or newer and npm are installed, and that npm can reach its registry once to download the package." }, EXIT_CODES.failed);
   }

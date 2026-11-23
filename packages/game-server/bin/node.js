@@ -956,10 +956,84 @@ function playLocallyArguments(argumentList) {
   return { folder: folder ?? ".", portNumber, gameSlug: flags.game ?? null, isOnNetwork: flags["on-network"] === true, isOpening: flags["no-open"] !== true, isJson: flags.json === true };
 }
 
+/** How this copy of a package was installed, from where its file sits: through npx, in a project, globally, or a source checkout. */
+function installKindOf(filePath) {
+  const path = filePath.replaceAll("\\", "/");
+  if (path.includes("/_npx/")) return "npx";
+  return installKindAt(path);
+}
+
+/**
+ * A project's or a global install, from the folder that holds the outermost node_modules: a project has its package.json there,
+ * npm's global folder (lib/ under its prefix, wherever that is) has none. A path outside any node_modules is a source checkout.
+ */
+function installKindAt(path) {
+  const index = path.indexOf("/node_modules/");
+  if (index === -1) return "checkout";
+  try {
+    readFileSync(`${path.slice(0, index)}/package.json`);
+    return "project";
+  } catch {
+    return "global";
+  }
+}
+
+/** Whether a version is above another, both x.y.z. */
+function isVersionAbove(version, otherVersion) {
+  const [first, second] = [version, otherVersion].map((version) => /^(\d+)\.(\d+)\.(\d+)$/.exec(version ?? "")?.slice(1).map(Number));
+  if (!first || !second) return false;
+  for (let index = 0; index < 3; index++) if (first[index] !== second[index]) return first[index] > second[index];
+  return false;
+}
+
+/**
+ * The one line saying a newer version of a package is out, or null when this one is the latest (or npm wasn't reached). What to do
+ * follows from how it was installed: npx gets the latest when it starts again; a project's or a global install moves up with npm.
+ */
+function newerVersionLine({ packageName, version, latestVersion, installKind, command }) {
+  if (!latestVersion || !isVersionAbove(latestVersion, version)) return null;
+  if (installKind === "project") return `${packageName} ${latestVersion} is out, and this project has ${version}: run npm install ${packageName}@latest, then ${command} again.`;
+  if (installKind === "global") return `${packageName} ${latestVersion} is out, and this computer has ${version}: run npm install -g ${packageName}@latest, then ${command} again.`;
+  return `${packageName} ${latestVersion} is out (this is ${version}): stop it and run ${command} again to use it.`;
+}
+
+/**
+ * npm's newest version of a package in the given major, or null when npm doesn't answer within UPDATE_CHECK_TIMEOUT_MS: a start never
+ * waits on it. Within the major, since the CLI runs @zaisma/game-server@1 and a restart never reaches a later one.
+ */
+async function npmLatestVersion(packageName, major) {
+  const registryUrl = (process.env.npm_config_registry || "https://registry.npmjs.org").replace(/\/+$/, "");
+  try {
+    const response = await fetch(`${registryUrl}/${packageName.replace("/", "%2f")}`, { headers: { accept: "application/vnd.npm.install-v1+json" }, signal: AbortSignal.timeout(UPDATE_CHECK_TIMEOUT_MS) });
+    if (!response.ok) return null;
+    const { versions } = await response.json();
+    return Object.keys(versions ?? {}).filter((version) => /^\d+\.\d+\.\d+$/.test(version) && version.split(".")[0] === major).reduce((highest, version) => (highest === null || isVersionAbove(version, highest) ? version : highest), null);
+  } catch {
+    return null;
+  }
+}
+
+/** How long play-locally waits for npm to say whether a newer version is out, after it has started. */
+const UPDATE_CHECK_TIMEOUT_MS = 3000;
+
+/**
+ * The lines play-locally prints when a newer bench is out: this package's, and the CLI's when the CLI started it
+ * (ZAISMA_CLI_VERSION and ZAISMA_CLI_INSTALL_KIND). A source checkout checks nothing: it moves up with git.
+ */
+async function newerVersionLines() {
+  const packageFile = new URL("../package.json", import.meta.url);
+  const own = { packageName: "@zaisma/game-server", version: JSON.parse(readFileSync(packageFile, "utf8")).version, installKind: installKindOf(realpathSync(fileURLToPath(import.meta.url))) };
+  const cli = process.env.ZAISMA_CLI_VERSION ? { packageName: "@zaisma/cli", version: process.env.ZAISMA_CLI_VERSION, installKind: process.env.ZAISMA_CLI_INSTALL_KIND ?? "npx" } : null;
+  const checked = [cli, own].filter((each) => each && each.installKind !== "checkout");
+  const lines = await Promise.all(checked.map(async (each) => newerVersionLine({ ...each, latestVersion: await npmLatestVersion(each.packageName, each.version.split(".")[0]), command: "play-locally" })));
+  return lines.filter(Boolean);
+}
+
 /** zaisma-game-server play-locally: your game and its game server on this computer, with a test bench (bin/local-play.js). */
 async function playLocally(argumentList) {
   const given = playLocallyArguments(argumentList);
   if (!given) process.exit(1);
+  const newerLines = newerVersionLines();
   const { startLocalPlay, terminalQr } = await import("./local-play.js");
   const say = given.isJson ? (line) => console.error(line) : (line) => console.log(line);
   let running;
@@ -979,6 +1053,8 @@ async function playLocally(argumentList) {
     say(terminalQr(running.networkUrl));
     say("Your phone will say the connection isn't private, because the bench signs its own certificate. Continue to the site.");
   }
+  // A newer bench on npm: one line once npm answers, nothing when it doesn't or this is the latest.
+  newerLines.then((lines) => lines.forEach((line) => say(line)));
   if (given.isOpening) {
     const { spawn } = await import("node:child_process");
     const opener = process.platform === "darwin" ? ["open", [running.benchUrl]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", running.benchUrl]] : ["xdg-open", [running.benchUrl]];

@@ -235,7 +235,7 @@ One name per concept. The API and MCP column is snake_case; the SDK and game ser
 | --- | --- | --- |
 | A game's link name, as in zaisma.com/g/<slug> | `slug`; `new_slug` changes a private draft's (`can_change_slug`, else `slug_locked`) | `slug` |
 | A game's genres: up to 3 from one fixed list, which players filter Browse by | `genres` (a list of `action`, `adventure`, `role_playing`, `shooter`, `strategy`, `simulation`, `racing`, `sports`, `fighting`, `platformer`, `puzzle`, `horror`, `survival`, `sandbox`, `card_and_board`, `party`, `rhythm`, `visual_novel`); refused with `bad_genres`. Inside: `games.genres` (comma-separated), `GENRES`, `GENRE_LABELS`, `MAXIMUM_GENRE_COUNT` | |
-| A version of a game | `version_id` | |
+| A version of a game, and its short number in the game (Build 14), the same for its developer and its testers | `version_id`; `build_name` (`Build 14`), `current_build_name` and `next_build_name` on a tester link; columns `versions.build_number` (from 1), `games.build_count` | |
 | An error code's page, with what it means and the general fix | `help_url` | |
 | The Zaisma skill: the workflow and its references, for any AI, installed by the upload command | `zaisma skill` (the command); MCP resources `zaisma://skill`, `zaisma://sdk`, `zaisma://naming`, `zaisma://errors`, `zaisma://game-server`, `zaisma://developer-api`, `zaisma://multiplayer`, `zaisma://loading`, `zaisma://phones`, `zaisma://saves`; MCP prompts `make_game`, `publish_game`, `fix_problem` | |
 | How many accounts have a game in their favorites (Your games) now, never who | `favorite_count` | |

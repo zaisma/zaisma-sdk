@@ -3,10 +3,11 @@
 // Not a command: local-play.js starts it with one JSON argument and hears ZAISMA_LOCAL_RUNNER_READY when it listens.
 import { createServer } from "node:net";
 import { pathToFileURL } from "node:url";
-import { ROOM_MESSAGE_LIMITS, checkRoomData, isRoomCode, relay } from "../src/internal.ts";
+import { GAME_SERVER_LIMITS, ROOM_MESSAGE_LIMITS, STATE_COPY_INTERVAL_MS, checkRoomData, copyStartedAgainText, isRoomCode, relay } from "../src/internal.ts";
 import { dirname } from "node:path";
-import { loadWasmAsModules, localDatabase } from "./node-parts.js";
+import { loadWasmAsModules, localDatabase, preloadDataFiles } from "./node-parts.js";
 import { startServer } from "./node.js";
+import { COPY_STARTED_AGAIN_EXIT_CODE, countWebAssemblyMemories, heldToZaismaLimits, memoryBaselineBytes, memorySizeBytes, refuseOutsideModules } from "./like-zaisma.js";
 
 // How startServer hands this runner its way to send room messages as the developer (node.js).
 const LOCAL_BENCH_ROOM_MESSAGE = Symbol.for("zaisma.localBenchRoomMessage");
@@ -19,8 +20,34 @@ try {
     probe.once("error", (error) => reject(error?.code === "EADDRINUSE" ? new Error(`Port ${config.port} is already in use, so your game server can't start. Stop what's using it, or start the bench with another --port.`) : error));
     probe.listen(config.port, () => probe.close(resolve));
   });
-  if (config.entry) loadWasmAsModules(dirname(config.entry));
-  const gameServer = config.entry ? (await import(pathToFileURL(config.entry).href)).default : relay;
+  let gameServer = relay;
+  // The game server as a copy of it runs on Zaisma's rooms: its own modules only, its data files read whole as it starts,
+  // its handlers' CPU and its memory measured (like-zaisma.js). Everything the runner holds before it doesn't count.
+  let checkMemory = () => {};
+  if (config.entry) {
+    loadWasmAsModules(dirname(config.entry));
+    refuseOutsideModules(config.entry);
+    countWebAssemblyMemories();
+    const baselineBytes = memoryBaselineBytes();
+    preloadDataFiles(config.dataFolder);
+    // Said as Zaisma's rooms say a game server that fails to load.
+    const loaded = await import(pathToFileURL(config.entry).href).then(
+      (module) => module.default,
+      (error) => {
+        throw new Error(`Zaisma: the game server didn't start: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      },
+    );
+    let isCopyStartingAgain = false;
+    checkMemory = () => {
+      if (isCopyStartingAgain) return;
+      const sizeBytes = memorySizeBytes(baselineBytes);
+      if (sizeBytes <= GAME_SERVER_LIMITS.maximumMemorySizeBytes) return;
+      isCopyStartingAgain = true;
+      console.error(copyStartedAgainText(sizeBytes));
+      void stop(COPY_STARTED_AGAIN_EXIT_CODE);
+    };
+    gameServer = loaded && typeof loaded === "object" ? heldToZaismaLimits(loaded, { print: (level, text) => (level === "error" ? console.error(text) : console.warn(text)), onStart: () => setImmediate(checkMemory) }) : loaded;
+  }
   const running = startServer({
     gameServer,
     gameSlug: config.gameSlug,
@@ -36,10 +63,11 @@ try {
     developerApiUrl: config.developerApiUrl,
   });
   let stopping = null;
-  const stop = () => (stopping ??= running.close().then(() => process.exit(0)));
-  for (const signal of ["SIGTERM", "SIGINT"]) process.once(signal, stop);
+  const stop = (exitCode = 0) => (stopping ??= running.close().then(() => process.exit(exitCode)));
+  setInterval(() => checkMemory(), STATE_COPY_INTERVAL_MS).unref();
+  for (const signal of ["SIGTERM", "SIGINT"]) process.once(signal, () => stop());
   // The bench holds this pipe open while it runs: when it ends, however it ended, this game server stops too (rooms save first).
-  process.stdin.once("close", stop);
+  process.stdin.once("close", () => stop());
   // The bench's sends to rooms come as JSON lines on the same pipe, { askNumber, message, roomCode }, each answered on a line of its own.
   let rest = "";
   process.stdin.setEncoding("utf8");

@@ -2,6 +2,7 @@
 // Never published or locked: games and developers' servers use the package's index.
 export * from "./room.ts";
 export * from "./room-calls.ts";
+export * from "./sandbox-limits.ts";
 export * from "./state-sync.ts";
 export * from "./database.ts";
 export * from "./dump.ts";

@@ -2,9 +2,9 @@
 // profiles, its local SQLite files, and the checks on its options. Nothing here is part of the
 // public package: tests reach it by path.
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { registerHooks } from "node:module";
-import { resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DATABASE_LIMITS, GameServerError, answerDatabase, checkBatch, checkPlayerId, checkStatement, checkedRow, eraseRefused, eraseStatements, readDatabaseAnswer, tablesFromColumns, tooManyRows, TABLE_COLUMNS_SQL } from "../src/internal.ts";
 
@@ -429,9 +429,12 @@ const CODE_FILE = /\.(js|json|wasm)$/;
  * room.readDataFile and server.readDataFile on your own server: a data file from the folder by its path there (each
  * read once, then the same ArrayBuffer), or null for no such file, a code file, or a path outside the folder.
  */
+// The files play-locally read first (preloadDataFiles), by folder: the reader of that folder starts from them.
+const preloadedByFolder = new Map();
+
 export function dataFilesFrom(dataFolder) {
   const folder = resolve(dataFolder);
-  const read = new Map();
+  const read = preloadedByFolder.get(folder) ?? new Map();
   return (dataFilePath) => {
     if (read.has(dataFilePath)) return read.get(dataFilePath);
     const path = resolve(folder, dataFilePath);
@@ -451,6 +454,32 @@ export function dataFilesFrom(dataFolder) {
     if (found !== null) read.set(dataFilePath, found);
     return found;
   };
+}
+
+/**
+ * Reads every data file in the folder now, as a copy of the game server on Zaisma's rooms does as it starts, so they
+ * count in its memory from the start (play-locally). Answers their size in all.
+ */
+export function preloadDataFiles(dataFolder) {
+  const folder = resolve(dataFolder);
+  if (!preloadedByFolder.has(folder)) preloadedByFolder.set(folder, new Map());
+  const find = dataFilesFrom(folder);
+  let sizeBytes = 0;
+  const walk = (subfolder) => {
+    let entries = [];
+    try {
+      entries = readdirSync(join(folder, subfolder), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = subfolder ? `${subfolder}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile()) sizeBytes += find(path)?.byteLength ?? 0;
+    }
+  };
+  walk("");
+  return sizeBytes;
 }
 
 /**

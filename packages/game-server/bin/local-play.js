@@ -28,6 +28,7 @@ import { BUSY_CLOSE_CODE, GameServerError, PASS_VERSION_NUMBER, RECEIPT_TOKEN_TY
 import { qrCodeModules, qrCodeSvg } from "../src/qr-code.ts";
 import { ARRIVE_SCRIPT_SOURCE, FRAME_ALLOW, KEPT_SCRIPT_SOURCE, devScriptSource } from "./local-play-bench.js";
 import { isCertificateGood, makeCertificate } from "./local-play-certificate.js";
+import { COPY_STARTED_AGAIN_EXIT_CODE } from "./like-zaisma.js";
 
 /** The first of the four ports. */
 export const DEFAULT_PORT_NUMBER = 4800;
@@ -44,6 +45,9 @@ const PASS_DURATION_SEC = 24 * 3600;
 const SCRIPTS_VERSION_NUMBER = 7;
 const SLOW_RESTART_MS = 150;
 const RUNNER_START_TIMEOUT_MS = 15_000;
+/** Memory restarts in MEMORY_RESTART_WINDOW_MS the bench makes before it waits for a fix, so one that goes over as soon as it starts doesn't restart for good. */
+const MEMORY_RESTART_COUNT = 3;
+const MEMORY_RESTART_WINDOW_MS = 60_000;
 const LOCAL_RUNNER_KEY = "zaisma-local-key";
 const TYPES = {
   ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
@@ -1522,7 +1526,8 @@ export async function startLocalPlay(givenOptions) {
         tell("reload");
       }
       const config = { entry: entry(), gameSlug, port: ports.runner, origin: localhostOrigin(ports.game), issuerUrl: roomsAddress(), databaseFile: join(localFolder, "database.sqlite"), roomStateFile: join(localFolder, "room-states.sqlite"), dataFolder: join(gameFolder, "zaisma-server"), developerApiUrl: `${roomsAddress()}/api/dev`, zaismaKey: LOCAL_RUNNER_KEY };
-      const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", runnerFile, JSON.stringify(config)], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } });
+      // --expose-gc: the runner collects garbage before it decides a game server is over its memory (like-zaisma.js).
+      const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "--expose-gc", runnerFile, JSON.stringify(config)], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } });
       let isReady = false;
       const timeout = setTimeout(() => {
         if (!isReady) {
@@ -1558,6 +1563,17 @@ export async function startLocalPlay(givenOptions) {
         if (!isReady) {
           if (!isClosing) log("Your game server didn't start. Fix what it says above and save the file: it starts again by itself.");
           done(null);
+        } else if (!isClosing && !child.zaismaIsRestarting && code === COPY_STARTED_AGAIN_EXIT_CODE) {
+          // Over its memory: Zaisma's rooms start its copy again by themselves, and so does the bench, unless it keeps going over.
+          const nowMs = Date.now();
+          memoryRestartsAtMs = [...memoryRestartsAtMs.filter((atMs) => nowMs - atMs < MEMORY_RESTART_WINDOW_MS), nowMs];
+          if (memoryRestartsAtMs.length > MEMORY_RESTART_COUNT) {
+            log(`Your game server went over its memory ${memoryRestartsAtMs.length} times in a minute, so the bench stopped starting it again. Fix it and save a game server file to start it again.`);
+            memoryRestartsAtMs = [];
+          } else {
+            log("Your game server is starting again, as Zaisma's rooms start a copy that went over its memory. Here every room is saved and comes back through onRestored, and players reconnect; on Zaisma, players stay and the room carries on from its last state copy, with no onRestored.");
+            void restartRunner();
+          }
         } else if (!isClosing && !child.zaismaIsRestarting) log(`Your game server stopped (exit code ${code}). Save a game server file to start it again.`);
       });
       runnerStartCount++;
@@ -1576,6 +1592,8 @@ export async function startLocalPlay(givenOptions) {
       setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
     });
   }
+  // When the game server went over its memory lately: past MEMORY_RESTART_COUNT in a minute, the bench waits for a fix.
+  let memoryRestartsAtMs = [];
   let restartChain = Promise.resolve();
   const restartRunner = () => {
     restartChain = restartChain.then(async () => {

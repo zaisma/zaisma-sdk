@@ -1583,7 +1583,7 @@ The same handler can post a crash (`event.kind === "game_server_error_found"`, w
 
 Secret links that open the game for anyone who has them, once its AI review lets the version through or at once for a developer who has earned that (see The AI review), whatever its visibility, so a private or draft game can be played before it's public, and an update before players get it. Testers need no account. Make one per group (your team, playtesters, a streamer) and name it for them, so you can turn one off without the others.
 
-Before a build reaches testers, try its online play on your own computer: `npx @zaisma/cli play-locally` in the game's folder runs it and its game server with a test bench, no key needed (README, "Play it on your own computer").
+Before a build reaches testers, try its online play on your own computer: `npx @zaisma/cli play-locally` in the game's folder runs it and its game server with a test bench, no key needed, holding the game server to the memory, CPU and modules a copy has on Zaisma's rooms, so one that fails there fails here first, with the same line (README, "Play it on your own computer").
 
 | Call | What it does |
 | --- | --- |

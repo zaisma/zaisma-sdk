@@ -4,6 +4,7 @@
 // the upload command runs it in Node and the site imports it as it is.
 // Docs: https://github.com/zaisma/zaisma-sdk/blob/main/docs/DEVELOPER-API.md#checking-a-game
 import { findAssetNotes } from "./performance.mjs";
+import { runFixedChecks } from "./fixed-checks.mjs";
 
 /** Every file type a game may contain: the extensions in CONTENT_TYPES (packages/core/src/mime.ts), in its order. */
 export const GAME_FILE_EXTENSIONS = [
@@ -47,6 +48,19 @@ export const CHECK_PROBLEM_CODES = {
   outside_link: { problemKind: "broken", isFixedByUploadCommand: false, meaning: "A link that opens another site or a new window, which the game's frame doesn't allow." },
   outside_frame: { problemKind: "broken", isFixedByUploadCommand: false, meaning: "A frame of another site, which games can't show." },
   blocked_feature: { problemKind: "broken", isFixedByUploadCommand: false, meaning: "Camera, microphone, screen capture, location, payments, USB, serial, Bluetooth or HID, which games on Zaisma can't use." },
+  // Zaisma's fixed checks (fixed-checks.mjs): the scan refuses a version with any of these, the same answer every time.
+  crypto_miner: { problemKind: "refused", isFixedByUploadCommand: false, meaning: "The code mines cryptocurrency." },
+  disguised_code: { problemKind: "refused", isFixedByUploadCommand: false, meaning: "The code runs text it decodes (base64, character codes or bytes) as code, which hides what it runs." },
+  password_field: { problemKind: "refused", isFixedByUploadCommand: false, meaning: "The game has a password field." },
+  wallet_request: { problemKind: "refused", isFixedByUploadCommand: false, meaning: "The game asks for a crypto wallet's seed phrase or private key, or for access to a wallet other than Bitcoin's." },
+};
+
+/** What to do about each fixed check's refusal. */
+const FIXED_CHECK_FIXES = {
+  crypto_miner: "Take the mining code out.",
+  disguised_code: "Ship the code as plain files the game loads. An ordinary minified or bundled build is fine, and so is running a file from the game's own files; eval or the Function constructor on text decoded from base64, character codes or bytes isn't.",
+  password_field: "Take the password field out: players sign in with Zaisma, so games never ask for passwords. For a secret code players type, use a plain text field.",
+  wallet_request: "Take the request out: a game never asks for a seed phrase or private key, and crypto on Zaisma is Bitcoin only, with no asking for access to a player's wallet.",
 };
 
 /** Hosts that appear in nearly every file and never load anything (the scan's own list, packages/core/src/scan/static.ts). */
@@ -412,6 +426,11 @@ export function checkGameFiles(files, { slug = null, ownServerUrls = null } = {}
 
     const threadsMatch = THREADS_PATTERNS.map((pattern) => pattern.exec(text)).find(Boolean);
     if (threadsMatch) addThreads(COI_SERVICE_WORKER_PATTERN.test(path) ? coiServiceWorkerMessage(path) : `${path} is from a build that needs threads (SharedArrayBuffer), which only Chrome and Edge give games on Zaisma.`, lineAround(text, threadsMatch.index), path);
+
+    for (const finding of runFixedChecks([{ path, text }]).findings) {
+      if (finding.severity !== "reject") continue;
+      add(finding.code, { message: `${path}: ${finding.message}`, path, quote: finding.quote ?? null, fix: FIXED_CHECK_FIXES[finding.code] });
+    }
 
     if (isEngineOutput(path, lowercasePaths)) continue;
     // What the code does, not what its comments say: a library's docs mention alert() and window.open.

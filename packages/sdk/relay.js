@@ -71,8 +71,20 @@
     });
   }
 
+  /** A frame of the game's own (a srcdoc frame runs its own copy of this script) asks the game page's copy, which Zaisma's page answers. */
+  var RELAY_KEY = typeof Symbol === "function" ? Symbol.for("zaisma.relayServers") : "__zaismaRelayServers";
+  function parentRelayServers() {
+    try {
+      return window.parent !== window && typeof window.parent[RELAY_KEY] === "function" ? window.parent[RELAY_KEY] : null;
+    } catch (error) {
+      return null; // another site's frame
+    }
+  }
+
   /** Zaisma's relay servers, as iceServers: [] when there are none to be had (connections then don't connect, rather than go direct). */
   function relayServers() {
+    var fromParent = parentRelayServers();
+    if (fromParent) return fromParent();
     if (isFresh(kept)) return Promise.resolve(kept.iceServers);
     var stored = storedCredentials();
     if (stored) {
@@ -251,6 +263,7 @@
         Object.defineProperty(Element.prototype, property, { configurable: true, enumerable: descriptor.enumerable, get: get });
       });
     });
+    watchInsertedFrames(target);
     var nativeOpen = target.open;
     if (typeof nativeOpen === "function" && !getters.has(nativeOpen)) {
       var open = function () {
@@ -263,6 +276,98 @@
     }
   }
 
+  /**
+   * A frame is a window of its own the moment it's in the page, and a game can reach it by index (window[0]) without
+   * going through contentWindow: every frame in the page is wrapped right after anything is put into the page, and a
+   * frame made from text (srcdoc) runs this script first, from the address it came from. Only the page's own frames
+   * are looked at, so a page with none pays one length check per change.
+   */
+  var relayUrl = window.document && window.document.currentScript && window.document.currentScript.src ? window.document.currentScript.src : "";
+
+  function installFrames(target) {
+    try {
+      var targetDocument = target.document;
+      ["iframe", "frame", "object"].forEach(function (tag) {
+        var frames = targetDocument.getElementsByTagName(tag);
+        for (var index = 0; index < frames.length; index++) install(frames[index].contentWindow);
+      });
+    } catch (error) {
+      /* a frame of another site: nothing of it is reachable from here */
+    }
+  }
+
+  function watchInsertedFrames(target) {
+    var Node = target.Node;
+    var Element = target.Element;
+    if (typeof Node !== "function" || typeof Element !== "function") return;
+    var after = function (proto, name) {
+      var native = proto[name];
+      if (typeof native !== "function" || getters.has(native)) return;
+      var wrapped = function () {
+        var answer = native.apply(this, arguments);
+        installFrames(target);
+        return answer;
+      };
+      getters.add(wrapped);
+      Object.defineProperty(proto, name, { configurable: true, writable: true, enumerable: false, value: wrapped });
+    };
+    ["appendChild", "insertBefore", "replaceChild"].forEach(function (name) { after(Node.prototype, name); });
+    ["append", "prepend", "before", "after", "replaceWith", "replaceChildren", "insertAdjacentElement", "insertAdjacentHTML"].forEach(function (name) { after(Element.prototype, name); });
+    // A frame's own page replaces its first one when it loads (a srcdoc in the page's markup, say): wrapped before the game's load handler runs.
+    if (target.document && typeof target.document.addEventListener === "function") target.document.addEventListener("load", function () { installFrames(target); }, true);
+    ["innerHTML", "outerHTML"].forEach(function (property) {
+      var descriptor = Object.getOwnPropertyDescriptor(Element.prototype, property);
+      if (!descriptor || !descriptor.set || getters.has(descriptor.set)) return;
+      var nativeSet = descriptor.set;
+      var set = function (text) {
+        nativeSet.call(this, text);
+        installFrames(target);
+      };
+      getters.add(set);
+      Object.defineProperty(Element.prototype, property, { configurable: true, enumerable: descriptor.enumerable, get: descriptor.get, set: set });
+    });
+    // A frame made from text runs this script before its own.
+    var Frame = target.HTMLIFrameElement;
+    if (!relayUrl || typeof Frame !== "function") return;
+    var withRelay = function (text) { return '<script src="' + relayUrl.replace(/"/g, "&quot;") + '"></script>' + String(text); };
+    var srcdoc = Object.getOwnPropertyDescriptor(Frame.prototype, "srcdoc");
+    if (srcdoc && srcdoc.set && !getters.has(srcdoc.set)) {
+      var nativeSrcdoc = srcdoc.set;
+      var setSrcdoc = function (text) { nativeSrcdoc.call(this, withRelay(text)); };
+      getters.add(setSrcdoc);
+      Object.defineProperty(Frame.prototype, "srcdoc", { configurable: true, enumerable: srcdoc.enumerable, get: srcdoc.get, set: setSrcdoc });
+    }
+    // Whatever else puts a frame or a srcdoc in the page (the page's own markup, document.write, setHTMLUnsafe, an attribute
+    // set some other way) is seen here, before the frame's page loads: its srcdoc gets this script first, and its window is wrapped.
+    var Observer = target.MutationObserver;
+    if (typeof Observer === "function" && target.document && target.document.documentElement && typeof nativeSrcdoc === "function") {
+      var prefix = withRelay("");
+      new Observer(function () {
+        var frames = target.document.getElementsByTagName("iframe");
+        for (var index = 0; index < frames.length; index++) {
+          var frame = frames[index];
+          var text = frame.getAttribute("srcdoc");
+          if (text !== null && text.indexOf(prefix) !== 0) nativeSrcdoc.call(frame, withRelay(text));
+        }
+        installFrames(target);
+      }).observe(target.document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["srcdoc"] });
+    }
+    var nativeSetAttribute = Element.prototype.setAttribute;
+    if (typeof nativeSetAttribute === "function" && !getters.has(nativeSetAttribute)) {
+      var setAttribute = function (name, text) {
+        var isSrcdoc = this instanceof Frame && String(name).toLowerCase() === "srcdoc";
+        return nativeSetAttribute.call(this, name, isSrcdoc ? withRelay(text) : text);
+      };
+      getters.add(setAttribute);
+      Object.defineProperty(Element.prototype, "setAttribute", { configurable: true, writable: true, enumerable: false, value: setAttribute });
+    }
+  }
+
+  try {
+    Object.defineProperty(window, RELAY_KEY, { configurable: false, enumerable: false, writable: false, value: relayServers });
+  } catch (error) {
+    /* already there: this script ran twice */
+  }
   install(window);
   // A game that plays online gets its relay servers while it loads, so its first connection doesn't wait.
   if (config.fetchEarly && NAMES.some(function (name) { return typeof window[name] === "function"; })) relayServers();

@@ -19,6 +19,7 @@ export type WebhookEventKind =
   | "bug_reported"
   | "player_reported"
   | "scan_status_changed"
+  /** No longer sent: Zaisma's fixed checks replaced the AI review. Kept so v1's type only ever gains. */
   | "ai_review_finished"
   | "live_version_changed"
   | "review_status_changed"

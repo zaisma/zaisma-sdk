@@ -516,6 +516,6 @@ A game can sell itself once, like a PC or console game: name one of its items as
 
 ### How games are kept safe
 
-- Every upload is scanned before it goes live: file-type and executable checks, static malware checks, known-illegal-image matching and an AI review. Anything unclear waits for a person.
+- Every upload passes Zaisma's fixed checks before it goes live: file-type and executable checks, crypto miners, code that hides what it runs, password fields and wallet requests, and known-illegal-image matching. No AI reads an upload, and the same files always get the same answer. Only known images, copies and a scan that couldn't finish wait for a person.
 - Games run on a separate domain inside a sandboxed frame, with a strict Content Security Policy: no access to zaisma.com, no cookies, no outside scripts, and connections only to Zaisma rooms and the game's own listed servers. They open no pages themselves: only their registered links, through Zaisma's leaving card, each site checked against Cloudflare's malware and phishing list.
 - Every game page has a Report button. Takedowns apply at once and are logged.

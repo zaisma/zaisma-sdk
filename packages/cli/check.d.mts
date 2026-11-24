@@ -19,7 +19,11 @@ export type CheckProblemCode =
   | "file_download"
   | "outside_link"
   | "outside_frame"
-  | "blocked_feature";
+  | "blocked_feature"
+  | "crypto_miner"
+  | "disguised_code"
+  | "password_field"
+  | "wallet_request";
 
 export type ProblemKind = "refused" | "broken";
 

@@ -7,7 +7,7 @@ name: Publish CLI
 on:
   push:
     branches: [main]
-    paths: ["packages/cli/**"]
+    paths: ["packages/cli/**", ".github/workflows/publish-cli.yml"]
   workflow_dispatch:
 
 permissions:
@@ -41,6 +41,9 @@ jobs:
             echo "is_new=true" >> "$GITHUB_OUTPUT"
             echo "@zaisma/cli $VERSION is new: publishing."
           fi
+      # The CLI's own dependencies, as `npx @zaisma/cli` installs them with the package: the smoke test imports them.
+      - if: steps.version.outputs.is_new == 'true'
+        run: npm install --no-audit --no-fund
       # The command starts and lists its commands, and the package holds every file it names.
       - if: steps.version.outputs.is_new == 'true'
         working-directory: packages/cli

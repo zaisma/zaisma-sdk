@@ -11,7 +11,7 @@ import { CHAT_CHECK_LIMITS, CHAT_ROOM_LIMITS } from "./chat.ts";
 import { DatabaseError, type GameDatabase } from "./database.ts";
 import { answersJson, checkDoor, fieldsOf, gameData, listOf, orNothing, realNumber, schemaProblems, text as textUpTo, yesOrNo, type DoorBody, type DoorCaller, type DoorContract, type DoorShape } from "./doors.ts";
 import { isRoomCode, roomCode } from "./names.ts";
-import type { PassClaims, PlayerKind, ReceiptClaims } from "./pass.ts";
+import { chatReachOf, isWithinChatReach, type ChatReach, type PassClaims, type PlayerKind, type ReceiptClaims } from "./pass.ts";
 import type { Server } from "./requests.ts";
 import { readSchedules, type Schedule, type ScheduledRun } from "./schedules.ts";
 import { roomCallChecks, type CheckedDelivery } from "./room-calls.ts";
@@ -470,9 +470,8 @@ export interface GameServer<S = any> {
   stateSyncEnabled?: boolean;
   /**
    * Check chat between adults (room.chat) with Zaisma's filter too: contact details, moving apps or
-   * meeting up, personal details and sexual content are stopped, as they always are for under-18s. Off by
-   * default, when chat between adults is only flagged (hasSwearing, hasSlur) and your game decides. Each
-   * message the filter's AI looks at counts on your hosting meter (adult_chat_checks).
+   * meeting up are stopped, as they always are where an under-18 sends or reads. Off by default, when chat
+   * between adults is only flagged (hasSwearing, hasSlur) and your game decides. Free.
    */
   adultChatFilterEnabled?: boolean;
   /**
@@ -1562,26 +1561,37 @@ export function errorMessage(code: RoomErrorCode, message?: string, details?: { 
 }
 
 /**
- * Who an account player may chat with, from their pass (who_can_chat and chat_group_id): kept by the
- * room's host, never shown to the game. A guest has none and chats with nobody.
+ * How far an account player's chat reaches, from their pass (chatReachOf): who reads what they type (sending),
+ * whose chat they read (reading), their chat group, and their sealed network for Zaisma's witness rule. Kept by
+ * the room's host, never shown to the game. A guest has none and chats with nobody.
  */
 export interface PlayerChatSettings {
-  whoCanChat: "nobody" | "friends" | "anyone";
+  sending: ChatReach;
+  reading: ChatReach;
   chatGroupId: string | null;
+  networkSeal: string | null;
 }
 
 /**
- * The chat settings of a player your own server let in from outside Zaisma (outside_zaisma): they chat with
- * anyone who chats with anyone, in no chat group, and Zaisma's chat check stops any message between them and
- * an under-18 account. Zaisma's chat groups are chat_group_… IDs, so none is ever this one.
+ * The chat settings of a player your own server let in from outside Zaisma (outside_zaisma): they send to and read
+ * everyone, in a chat group of their own, and Zaisma's chat check stops any message between them and an under-18
+ * account. Zaisma's chat groups are chat_group_… IDs, so none is ever this one.
  */
-export const OUTSIDE_ZAISMA_CHAT_SETTINGS: PlayerChatSettings = { whoCanChat: "anyone", chatGroupId: "outside_zaisma" };
+export const OUTSIDE_ZAISMA_CHAT_SETTINGS: PlayerChatSettings = { sending: "everyone", reading: "everyone", chatGroupId: "outside_zaisma", networkSeal: null };
 
-/** A checked pass's chat settings, for RoomCore.setChatSettings: null for a guest. A setting this version doesn't know chats with nobody. */
+/** A checked pass's chat settings, for RoomCore.setChatSettings: null for a guest. A choice this version doesn't know reaches nobody. */
 export function chatSettingsOf(claims: PassClaims): PlayerChatSettings | null {
   if (claims.kind !== "account") return null;
-  const whoCanChat: PlayerChatSettings["whoCanChat"] = claims.who_can_chat === "friends" ? "friends" : claims.who_can_chat === "anyone" ? "anyone" : "nobody";
-  return { whoCanChat, chatGroupId: typeof claims.chat_group_id === "string" ? claims.chat_group_id : null };
+  return { ...chatReachOf(claims), chatGroupId: typeof claims.chat_group_id === "string" ? claims.chat_group_id : null, networkSeal: typeof claims.network_seal === "string" ? claims.network_seal : null };
+}
+
+/** Chat settings a room saved, in today's shape: one saved before who_reads_my_chat reads as v1's two-way setting did. */
+function savedChatSettings(saved: Partial<PlayerChatSettings> & { whoCanChat?: unknown }): PlayerChatSettings {
+  const chatGroupId = typeof saved.chatGroupId === "string" ? saved.chatGroupId : null;
+  const networkSeal = typeof saved.networkSeal === "string" ? saved.networkSeal : null;
+  if (saved.sending !== undefined && saved.reading !== undefined) return { sending: saved.sending, reading: saved.reading, chatGroupId, networkSeal };
+  const reach: ChatReach = chatGroupId === OUTSIDE_ZAISMA_CHAT_SETTINGS.chatGroupId ? "everyone" : saved.whoCanChat === "friends" ? "friends" : saved.whoCanChat === "anyone" ? "my_age_band" : "nobody";
+  return { sending: reach, reading: reach, chatGroupId, networkSeal };
 }
 
 /** A chat message from a client as readChatMessage found it, for startChat to check. */
@@ -2113,7 +2123,7 @@ export class RoomCore<S = any> {
       for (const [first, second] of saved.accountBlocks ?? []) this.accountBlocks.add(pairKey(first, second));
       for (const [blocker, blocked] of saved.sessionBlocks ?? []) this.sessionBlocks.add(blockKey(blocker, blocked));
       for (const [first, second] of saved.friendships ?? []) this.friendships.add(pairKey(first, second));
-      for (const [id, settings] of Object.entries(saved.chatSettings ?? {})) this.chatSettings.set(id, settings);
+      for (const [id, settings] of Object.entries(saved.chatSettings ?? {})) this.chatSettings.set(id, savedChatSettings(settings));
     } else if (startOptions.start) {
       const start = startOptions.start;
       this.isOpen = false;
@@ -2332,30 +2342,34 @@ export class RoomCore<S = any> {
 
   /** A player's chat settings from their pass, before join: null for a guest, who chats with nobody. */
   setChatSettings(playerId: string, settings: PlayerChatSettings | null): void {
-    if (settings) this.chatSettings.set(playerId, { whoCanChat: settings.whoCanChat, chatGroupId: settings.chatGroupId });
+    if (settings) this.chatSettings.set(playerId, { sending: settings.sending, reading: settings.reading, chatGroupId: settings.chatGroupId, networkSeal: settings.networkSeal });
     else if (!this.chatSettings.delete(playerId)) return;
     this.dirty = true;
   }
 
-  /** Whether a player can chat at all: an account whose setting isn't nobody, with a chat group. */
+  /** Whether a player can send chat at all: an account whose chat isn't stopped, with a chat group. */
   canChat(playerId: string): boolean {
     const settings = this.chatSettings.get(playerId);
-    return settings !== undefined && settings.whoCanChat !== "nobody" && settings.chatGroupId !== null;
+    return settings !== undefined && settings.sending !== "nobody" && settings.chatGroupId !== null;
+  }
+
+  /** A player's sealed network from their pass, for Zaisma's witness rule: null for a guest, a player from outside Zaisma or an older pass. */
+  networkSealOf(playerId: string): string | null {
+    return this.chatSettings.get(playerId)?.networkSeal ?? null;
   }
 
   /**
-   * Whether one player's chat may reach another, canChat's rule on passes (pass.ts): two accounts in the
-   * same chat group with no block either way, friends unless both chat with anyone. A player from outside
-   * Zaisma is in no chat group: they chat with anyone who chats with anyone, and Zaisma's chat check stops
-   * what would reach an under-18 account or come from one.
+   * Whether one player's chat may reach another, canChat's rule on passes (pass.ts), sender to reader: no block
+   * either way, the reader reads chat, and the sender's choice takes the reader in (everyone; the same chat group;
+   * a friend in it). Zaisma's chat check stops what would reach an under-18 account without witnesses.
    */
   private mayChat(senderPlayerId: string, receiverPlayerId: string): boolean {
-    if (senderPlayerId === receiverPlayerId || !this.canChat(senderPlayerId) || !this.canChat(receiverPlayerId) || this.hasBlockBetween(senderPlayerId, receiverPlayerId)) return false;
+    if (senderPlayerId === receiverPlayerId || !this.canChat(senderPlayerId) || this.hasBlockBetween(senderPlayerId, receiverPlayerId)) return false;
     const sender = this.chatSettings.get(senderPlayerId)!;
-    const receiver = this.chatSettings.get(receiverPlayerId)!;
-    const isOutside = (settings: PlayerChatSettings) => settings.chatGroupId === OUTSIDE_ZAISMA_CHAT_SETTINGS.chatGroupId;
-    if (sender.chatGroupId !== receiver.chatGroupId && !isOutside(sender) && !isOutside(receiver)) return false;
-    return (sender.whoCanChat === "anyone" && receiver.whoCanChat === "anyone") || this.areFriends(senderPlayerId, receiverPlayerId);
+    const receiver = this.chatSettings.get(receiverPlayerId);
+    if (!receiver || receiver.chatGroupId === null) return false;
+    const other = { isSameChatGroup: sender.chatGroupId === receiver.chatGroupId, isFriend: this.areFriends(senderPlayerId, receiverPlayerId) };
+    return isWithinChatReach(sender.sending, other) && isWithinChatReach(receiver.reading, other);
   }
 
   /** Who a player's chat may reach: the players in the match (or those of toPlayerIds in it), never spectators, kept only where they may chat. */
@@ -2418,14 +2432,18 @@ export class RoomCore<S = any> {
 
   /**
    * Send a chat message Zaisma's filter let through to its receivers, and tell the sender it went
-   * (chat_sent), even when it reached nobody: the sender never learns who can't read them.
+   * (chat_sent), even when it reached nobody: the sender never learns who can't read them. With isEveryReaderNeeded
+   * (Zaisma counted witnesses among them) it sends nothing and answers false when any of them can't read it now.
    */
-  deliverChat(senderPlayerId: string, chatNumber: number, receiverPlayerIds: readonly string[], chat: { text: string; hasSwearing: boolean; hasSlur: boolean }): void {
+  deliverChat(senderPlayerId: string, chatNumber: number, receiverPlayerIds: readonly string[], chat: { text: string; hasSwearing: boolean; hasSlur: boolean }, options: { isEveryReaderNeeded?: boolean } = {}): boolean {
     const sentAt = new Date(this.now()).toISOString();
     // Players who left, or blocked the sender, while the filter looked get nothing.
     const receivers = receiverPlayerIds.filter((id) => this.players.has(id) && this.mayChat(senderPlayerId, id));
+    // A message Zaisma let through only for the witnesses it counted doesn't go to fewer: the host stops it instead.
+    if (options.isEveryReaderNeeded && receivers.length < receiverPlayerIds.length) return false;
     if (receivers.length) this.sendEach(receivers, JSON.stringify({ type: "chat", fromPlayerId: senderPlayerId, text: chat.text, hasSwearing: chat.hasSwearing, hasSlur: chat.hasSlur, sentAt } satisfies ServerMessage), CHAT_MESSAGE_TYPE);
     this.sendText(senderPlayerId, JSON.stringify({ type: "chat_sent", chatNumber, sentAt } satisfies ServerMessage));
+    return true;
   }
 
   /** Tell the sender their chat message was stopped: reason is the filter's, or stopped_by_game; message is what they see. */

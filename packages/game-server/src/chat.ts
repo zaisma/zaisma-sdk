@@ -1,10 +1,12 @@
 /**
- * Zaisma's chat filter for your own server (docs/DECISIONS.md, "The text filter catches what matters and
- * leaves the rest alone"). Every chat message to or from an under-18 account is checked on Zaisma's side:
- * contact details in any disguise, moving to another app or meeting up, personal details and sexual
- * content are stopped. Swearing and slurs are only flagged (hasSwearing, hasSlur): blocking them is your
- * call. Between adults it only flags, unless you turn the filter on for them too (isAdultFilterEnabled).
- * The answer is one verdict for the whole message, never per receiver, so it never says who's under 18.
+ * Zaisma's chat check for your own server ("Chat with witnesses"). Every chat message an under-18 account sends or
+ * reads is checked on Zaisma's side, by two rules: it goes only where at least two independent players read it
+ * (established accounts on networks unlike the sender's and each other's, whispers and two-player rooms included),
+ * and it can't carry contact details, moving to another app or meeting up, in any disguise. Swearing and slurs are
+ * only flagged (hasSwearing, hasSlur): blocking them is your call. Between adults it only flags, unless you turn
+ * the filter on for them too (isAdultFilterEnabled). The answer is one verdict for the whole message, never per
+ * receiver; a message stopped between two players does show that one of them is under 18. Send the passes of the
+ * players who really read it: your server is trusted to, as it's trusted to call this at all.
  *
  * checkChat sends the players' passes (as your server received them) and the sender's last few messages to
  * Zaisma (POST <issuer>/v1/chat/check), so a phone number sent a few digits at a time is caught too.
@@ -21,8 +23,9 @@
 import { OutsideCallError } from "./outside-calls.ts";
 
 /**
- * Why a message was stopped. The same reasons as Zaisma.checkChat, plus chat_paused, not_allowed_to_chat and
- * unchecked (Zaisma couldn't be reached). slur is v1's and no longer given: slurs are flagged (hasSlur), never stopped.
+ * Why a message was stopped: contact_details, chat_paused, too_long, not_allowed_to_chat (canChat says no for a
+ * receiver, or too few independent players read a message an under-18 is in) and unchecked (Zaisma couldn't be
+ * reached). personal_details, sexual and slur are v1's and no longer given.
  */
 export type ChatCheckReason = "contact_details" | "personal_details" | "slur" | "sexual" | "chat_paused" | "unchecked" | "too_long" | "not_allowed_to_chat";
 
@@ -32,7 +35,8 @@ export interface ChatCheck {
   /**
    * Why not; null when it's allowed. chat_paused: the sender's chat is paused or removed. unchecked: your
    * server couldn't reach Zaisma, so don't deliver it (try again in a moment). too_long: over 2000 characters.
-   * not_allowed_to_chat: canChat says the sender and a receiver may not chat (Zaisma checks it too).
+   * not_allowed_to_chat: canChat says a receiver may not read the sender (Zaisma checks it too), or the message has
+   * an under-18 in it and fewer than two independent players read it.
    */
   reason: ChatCheckReason | null;
   /** The words to show the sender when it's stopped (never mentions age or the other player); null when it's allowed. */
@@ -50,7 +54,7 @@ export interface ChatCheckOptions {
   senderPass: string | null;
   /** The passes of everyone it would reach, up to 50; null for each player from outside Zaisma. */
   receiverPasses: (string | null)[];
-  /** Check chat between adults too, as for under-18s; each message Zaisma's AI looks at counts on your hosting meter. False by default. */
+  /** Check chat between adults for contact details too, as for under-18s. Free. False by default. */
   isAdultFilterEnabled?: boolean;
 }
 
@@ -118,10 +122,10 @@ function rememberText(senderPlayerId: string, text: string, nowMs: number): void
 }
 
 /**
- * Check one chat message with Zaisma's filter. Call it on every chat message your server delivers, after
- * canChat says the players may chat, and deliver it only when isAllowed (Zaisma applies canChat's rule
- * too, so a message to anyone who may not chat is stopped). It's free, except the checks of chat between
- * adults when isAdultFilterEnabled. When Zaisma can't be reached it answers unchecked: don't deliver the message.
+ * Check one chat message with Zaisma's filter. Call it on every chat message your server delivers, with the passes
+ * of everyone who'd read it, after canChat(sender, reader) says each may, and deliver it only when isAllowed, to all
+ * of them (Zaisma applies canChat's rule too, and may allow it only for the witnesses among them). It's free. When
+ * Zaisma can't be reached it answers unchecked: don't deliver the message.
  * The runner (zaisma-game-server) does all this for room.chat in its rooms.
  *
  *   const check = await checkChat({ text, senderPass, receiverPasses: [receiverPass] });

@@ -325,6 +325,8 @@ export async function startLocalPlay(givenOptions) {
     }
   }
   const glass = await loadGlass(localFolder);
+  // A mode a player's band no longer has (13–15's solo-focused, since chat left the presets): their band's own start.
+  for (const account of state.accounts) if (!glass.isSocialModeAllowed(account.ageBand, account.socialMode)) account.socialMode = glass.startingSocialMode(account.ageBand);
   const accountOf = (id) => state.accounts.find((account) => account.id === id) ?? null;
   const accountOfPlayer = (playerId) => state.accounts.find((account) => account.playerId === playerId) ?? null;
   const asOf = (playerNumber) => state.tabs[playerNumber] ?? "guest";
@@ -370,12 +372,15 @@ export async function startLocalPlay(givenOptions) {
     const nowSec = Math.floor(now() / 1000);
     const account = as === "guest" ? null : accountOf(as);
     const player = account ? { id: account.playerId, name: account.username, kind: "account" } : { ...guestOf(playerNumber), kind: "guest" };
-    // Who they chat with, by Zaisma's own rules for their age and social mode, and an opaque chat group for their band, never the age.
-    const chat = account ? glass.chatOf(account.ageBand, account.socialMode) : null;
+    // How their chat reaches, by Zaisma's own rules for their age, and an opaque chat group for their band, never the age.
+    // who_can_chat is v1's stricter stand-in, for servers that don't read who_reads_my_chat. The bench seals no network:
+    // its own chat check lets every message through.
+    const chat = account ? glass.chatOf(account.ageBand) : null;
     const claims = account
       ? {
           sub: account.playerId, aud: gameSlug, iss: issuerUrl, pass_version_number: PASS_VERSION_NUMBER, kind: "account",
-          who_can_chat: chat.whoCanChat, ...(chat.bandGroup ? { chat_group_id: `chat_group_${createHash("sha256").update(`local:${gameSlug}:${chat.bandGroup}`).digest("hex").slice(0, 24)}` } : {}),
+          who_can_chat: chat.whoReadsMyChat === "friends" ? "friends" : "anyone", who_reads_my_chat: chat.whoReadsMyChat, chat_reading_enabled: true,
+          chat_group_id: `chat_group_${createHash("sha256").update(`local:${gameSlug}:${chat.bandGroup}`).digest("hex").slice(0, 24)}`,
           player_tag_id: account.playerTagId, friend_player_tag_ids: tagsOf(friendIdsOf(account.id)), block_player_tag_ids: tagsOf(blockIdsOf(account.id)),
           owned_item_names: ownedNamesOf(account.id), iat: nowSec, exp: nowSec + PASS_DURATION_SEC,
         }
@@ -568,7 +573,7 @@ export async function startLocalPlay(givenOptions) {
   // --- The bench's API: everything the Players panel and the dev bar do, as JSON, for the developer's AI as much as for the panel ---
   // Players are named by their player_id, the ID games see. Answers and errors are shaped as Zaisma's developer API's.
   const apiPlayer = (account) => ({
-    player_id: account.playerId, name: account.username, age_band: account.ageBand, social_mode: account.socialMode, who_can_chat: glass.chatOf(account.ageBand, account.socialMode).whoCanChat,
+    player_id: account.playerId, name: account.username, age_band: account.ageBand, social_mode: account.socialMode, who_reads_my_chat: glass.chatOf(account.ageBand).whoReadsMyChat,
     open_player_numbers: openNumbersOf(account), friend_player_ids: playerIdsOf(friendIdsOf(account.id)), block_player_ids: playerIdsOf(blockedIdsOf(account)),
     blocked_by_player_ids: playerIdsOf(blockerIdsOf(account)), owned_item_names: ownedNamesOf(account.id),
   });
@@ -1328,10 +1333,31 @@ export async function startLocalPlay(givenOptions) {
         }
         return notLocal();
       }
-      // Zaisma's chat check, as the runner's rooms ask it for room.chat (checkChat): the bench lets every message through,
-      // nothing flagged, the way /v1/filter stands in below. Zaisma's own filter runs once the game is on Zaisma.
+      // Zaisma's chat check, as the runner's rooms ask it for room.chat (checkChat). The bench keeps Zaisma's witness rule, so
+      // a game sees here what it will there: a message an under-18 sends or reads goes only where two other players read it
+      // (every bench player counts as established, each on a network of its own), and a stranger from outside Zaisma never
+      // chats with an under-18. Its words aren't checked, nothing is flagged, the way /v1/filter stands in below.
       if (request.method === "POST" && path === "/v1/chat/check") {
-        await readBody();
+        const body = await readBody();
+        const subOf = (pass) => {
+          if (typeof pass !== "string") return null;
+          try {
+            return JSON.parse(Buffer.from(pass.split(".")[1] ?? "", "base64url").toString("utf8")).sub ?? null;
+          } catch {
+            return null;
+          }
+        };
+        const senderId = subOf(body.senderPass);
+        const passes = Array.isArray(body.receiverPasses) ? body.receiverPasses : [];
+        const readerIds = [...new Set(passes.map(subOf).filter((id) => id !== null && id !== senderId))];
+        const isMinor = (playerId) => {
+          const account = playerId === null ? null : accountOfPlayer(playerId);
+          return account !== null && account.ageBand !== "18+";
+        };
+        const hasMinor = isMinor(senderId) || readerIds.some(isMinor);
+        const hasOutsider = body.senderPass === null || passes.some((pass) => pass === null);
+        const isWitnessed = readerIds.filter((id) => accountOfPlayer(id) !== null).length >= 2;
+        if (hasMinor && (hasOutsider || !isWitnessed)) return reply(200, { isAllowed: false, reason: "not_allowed_to_chat", message: "Chat isn't open for this message.", hasSwearing: false, hasSlur: false });
         return reply(200, { isAllowed: true, reason: null, message: null, hasSwearing: false, hasSlur: false });
       }
       if (request.method === "POST" && ["/v1/pass", "/v1/rooms", "/v1/report", "/v1/filter", "/v1/friends", "/v1/friends/room", "/v1/items/unhandled", "/v1/items/handled"].includes(path)) {

@@ -1939,10 +1939,11 @@ interface PlayerWithPass extends Player {
    * game's own keys at https://rooms.zaisma.com/v1/pass-keys/<gameSlug>. It proves only who the player is: its sub
    * is the player's ID, kind says guest or account, aud is the game, pass_version_number is 1. A
    * guest's pass also carries their name; an account's name comes from its profile
-   * (https://rooms.zaisma.com/v1/players/<id>). An account's pass says who it can chat with:
-   * who_can_chat (nobody, friends or anyone, the player's own setting) and, when anyone, an opaque
-   * chat_group_id (chat_group_…) that differs in every game. Zaisma never tells a game anyone's age; a
-   * game could guess which chat group is the younger one from its size. It carries its friends and
+   * (https://rooms.zaisma.com/v1/players/<id>). An account's pass says how its chat reaches:
+   * who_reads_my_chat (friends, my_age_band or everyone; nobody while its chat is stopped), chat_reading_enabled,
+   * an opaque chat_group_id (chat_group_…) that differs in every game, network_seal (its network, sealed for
+   * Zaisma's witness rule alone), and v1's who_can_chat as a stricter stand-in. Zaisma never tells a game anyone's
+   * age; a game could guess which chat group is the younger one from its size. It carries its friends and
    * blocks, never as a list of players anyone can read: player_tag_id, its own opaque tag in this game
    * (player_tag_…), friend_player_tag_ids, its friends' tags (up to 200), and block_player_tag_ids, the
    * tags of the accounts it has a block with, either way (up to 100). Your own server checks it with

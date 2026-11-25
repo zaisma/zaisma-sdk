@@ -26,7 +26,7 @@ import { createServer } from "node:http";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { basename, dirname, join, resolve } from "node:path";
 import { readFileSync, realpathSync } from "node:fs";
-import { roomMessageProblem, BUSY_CLOSE_CODE, ENDED_CLOSE_CODE, ERROR_TEXT, NO_ANSWER_CLOSE_CODE, PASS_ISSUER_URL, OUTSIDE_ZAISMA_CHAT_SETTINGS, PassError, ReceiptError, REMOVED_CLOSE_CODE, REQUEST_ERROR_HTTP_STATUS, REQUEST_LIMITS, ROOM_LIMITS, ROOM_MESSAGE_LIMITS, ROOM_TUNING, WEBHOOK_LIMITS, GameServerError, RoomCore, chatSettingsOf, checkChat, readChatMessage, restoreInfoOf, passesAreFriends, passesHaveBlockBetween, answerRequest, startSchedules, checkRoomData, checkedOutsidePlayer, clientIdle, defineGameServer, errorMessage, guestPlayer, newServer, isPlayerToken, isRoomCode, readRequestBody, relay, requestError, runWebhook, tidyRoomInfo, verifyPass, verifyReceipt, verifyWebhook } from "../src/internal.ts";
+import { CHAT_CHECK_LIMITS, roomMessageProblem, BUSY_CLOSE_CODE, ENDED_CLOSE_CODE, ERROR_TEXT, NO_ANSWER_CLOSE_CODE, PASS_ISSUER_URL, OUTSIDE_ZAISMA_CHAT_SETTINGS, PassError, ReceiptError, REMOVED_CLOSE_CODE, REQUEST_ERROR_HTTP_STATUS, REQUEST_LIMITS, ROOM_LIMITS, ROOM_MESSAGE_LIMITS, ROOM_TUNING, WEBHOOK_LIMITS, GameServerError, RoomCore, chatSettingsOf, checkChat, readChatMessage, restoreInfoOf, passesAreFriends, passesHaveBlockBetween, answerRequest, startSchedules, checkRoomData, checkedOutsidePlayer, clientIdle, defineGameServer, errorMessage, guestPlayer, newServer, isPlayerToken, isRoomCode, readRequestBody, relay, requestError, runWebhook, tidyRoomInfo, verifyPass, verifyReceipt, verifyWebhook } from "../src/internal.ts";
 import { OutsideCallError } from "../src/outside-calls.ts";
 import { startFastLane } from "./fast-lane.js";
 import { checkedStartServerOptions, dataFilesFrom, loadWasmAsModules, localDatabase, localRoomStates, passKeysFrom, profilesFrom, receiptKeysFrom, secretsFromEnvironment } from "./node-parts.js";
@@ -565,8 +565,10 @@ export function startServer(options) {
   /**
    * A player's chat message (room.chat): the room checks it and asks the game server's onChat (startChat),
    * Zaisma's filter looks (checkChat, with the passes of those who may read it), and it goes to them
-   * (deliverChat) or the sender hears why not (stopChat). Everyone it may reach is in the sender's chat
-   * group, so the first CHAT_CHECK_LIMITS.maximumReceiverCount of them stand for the rest.
+   * (deliverChat) or the sender hears why not (stopChat). More readers than one check takes go in checks of
+   * CHAT_CHECK_LIMITS.maximumReceiverCount, each a full one (the last overlaps the one before), so each sees
+   * witnesses as the whole room has them, and every one must allow it. Zaisma may have let it through only for
+   * the witnesses it counted, so it goes to every reader or, when one can't read it by then, is stopped.
    */
   async function chatIn(room, playerId, chat) {
     const started = await room.core.startChat(playerId, chat);
@@ -576,10 +578,17 @@ export function startServer(options) {
       // A player from outside Zaisma goes as null: Zaisma stops their chat with under-18 accounts, and doesn't hear chat among them alone.
       const passOf = (id) => (room.core.players.get(id)?.kind === "outside_zaisma" ? null : (room.passTexts.get(id) ?? ""));
       const receiverPasses = started.receiverPlayerIds.map(passOf);
-      check = await checkChat({ text: started.text, senderPass: passOf(playerId), receiverPasses, isAdultFilterEnabled: definition.adultChatFilterEnabled === true });
+      const batchReceiverCount = CHAT_CHECK_LIMITS.maximumReceiverCount;
+      for (let endIndex = Math.min(batchReceiverCount, receiverPasses.length); ; endIndex = Math.min(endIndex + batchReceiverCount, receiverPasses.length)) {
+        const batch = receiverPasses.slice(Math.max(0, endIndex - batchReceiverCount), endIndex);
+        const batchCheck = await checkChat({ text: started.text, senderPass: passOf(playerId), receiverPasses: batch, isAdultFilterEnabled: definition.adultChatFilterEnabled === true });
+        check = { ...batchCheck, hasSwearing: check.hasSwearing || batchCheck.hasSwearing, hasSlur: check.hasSlur || batchCheck.hasSlur };
+        if (!batchCheck.isAllowed || endIndex === receiverPasses.length) break;
+      }
     }
-    if (check.isAllowed) room.core.deliverChat(playerId, chat.chatNumber, started.receiverPlayerIds, { text: started.text, hasSwearing: check.hasSwearing, hasSlur: check.hasSlur });
-    else room.core.stopChat(playerId, chat.chatNumber, check.reason ?? "unchecked", check.message ?? "");
+    if (!check.isAllowed) return room.core.stopChat(playerId, chat.chatNumber, check.reason ?? "unchecked", check.message ?? "");
+    const isDelivered = room.core.deliverChat(playerId, chat.chatNumber, started.receiverPlayerIds, { text: started.text, hasSwearing: check.hasSwearing, hasSlur: check.hasSlur }, { isEveryReaderNeeded: true });
+    if (!isDelivered) room.core.stopChat(playerId, chat.chatNumber, "not_allowed_to_chat", "Chat isn't open for this message.");
   }
 
   /** Keep a room for players on their way, even if it empties meanwhile. */

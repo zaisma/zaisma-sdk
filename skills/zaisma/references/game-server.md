@@ -64,7 +64,7 @@ export default {
                                                        // joinInfo: { fromRoomCode, isReturning, isSpectator } (isReturning: back to a held seat)
   canJoin(state, player, room, joinData, joinInfo) {}, // true lets them in; false or { refusalMessage } turns them away
   onChat(state, player, room, chatInfo) {},    // a player's room.chat, before Zaisma's filter: true, false or { toPlayerIds }
-  adultChatFilterEnabled: false,               // true: Zaisma's chat filter checks chat between adults too (on your meter)
+  adultChatFilterEnabled: false,               // true: Zaisma's chat filter stops contact details between adults too (free)
   onLeave(state, player, room, leaveInfo) {},  // leaveInfo.reason: left, lost, idle, hidden or kicked
   onMessage(state, player, room, message) {},
   onBytes(state, player, room, bytes) {},      // bytes a player's game sent (room.sendBytes), a Uint8Array
@@ -553,7 +553,7 @@ A room answers a refusal with `{ type: "error", code, message }`, then closes th
 | `bad_origin` | The connection didn't come from the game's own page. |
 | `send_queue_full` | The SDK's own: more than 60 sends waited while it reconnected, so the oldest were dropped. |
 | `chat_not_here` | A chat message reached a room whose server doesn't take chat (an older runner). |
-| `chat_not_allowed` | `room.chat` from a guest, or a player whose chat is set to nobody or paused (`room.canChat` is `false`). |
+| `chat_not_allowed` | `room.chat` from a guest, or a player whose chat is paused or removed (`room.canChat` is `false`). |
 | `chat_empty` | `room.chat` with nothing but spaces. |
 | `chat_too_long` | `room.chat` over 2000 characters. |
 | `chat_too_fast` | More than 20 chat messages in 10 seconds from one player. |

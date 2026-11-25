@@ -23,15 +23,28 @@ export interface PassClaims {
   /** guest or account, or a kind added later: treat one your server doesn't know as a guest. */
   kind: PlayerKind | (string & {});
   /**
-   * Who an account lets chat with it: nobody, its friends, or anyone in its chat group, or a choice
-   * added later (canChat matches only the ones it knows, so an unknown one chats with nobody).
-   * Guests' passes have none: guests don't chat.
+   * v1's chat setting, still sent for servers that don't read who_reads_my_chat: a stricter stand-in for it
+   * (nobody when the account's chat is stopped or it reads no chat, friends for Friends, anyone otherwise),
+   * read by canChat only on a pass without who_reads_my_chat. Guests' passes have none: guests don't chat.
    */
   who_can_chat?: WhoCanChat | (string & {});
   /**
-   * For accounts that chat at all (friends or anyone), the group they can chat in (chat_group_…): two
-   * players chat only when their groups match (canChat), friends included. Opaque and different in every
-   * game, so it never says an age; a game could guess which group is the younger one from its size.
+   * Who reads what this account types: its friends in its chat group, anyone in its chat group, everyone, or
+   * nobody while its chat is stopped; a choice added later reaches nobody. Guests' passes have none.
+   */
+  who_reads_my_chat?: WhoReadsMyChat | "nobody" | (string & {});
+  /** Whether this account reads others' chat at all: false when the player turned it off. Guests' passes have none. */
+  chat_reading_enabled?: boolean;
+  /**
+   * The player's network, sealed for Zaisma alone with a fresh nonce on every pass: it says nothing to your
+   * server, and two seals of one network look nothing alike. Zaisma's chat check opens it for the witness rule
+   * (anyone under 18 types only where two independent players read it). Pass it on as it is, in the pass.
+   */
+  network_seal?: string;
+  /**
+   * An account's chat group (chat_group_…): Friends and My age band reach only the same group, and only a
+   * sender who chose Everyone crosses it. Opaque and different in every game, so it never says an age; a game
+   * could guess which group is the younger one from its size.
    */
   chat_group_id?: string;
   /**
@@ -71,8 +84,36 @@ export interface PassClaims {
  */
 export type PlayerKind = "guest" | "account" | "outside_zaisma";
 
-/** No chat, friends only, or anyone in the same chat group: the player's "Who can chat with you" setting (docs/DECISIONS.md, "Social settings, with the social modes as presets"). */
+/** v1's chat setting: no chat, friends only, or anyone in the same chat group, both ways. who_reads_my_chat replaces it. */
 export type WhoCanChat = "nobody" | "friends" | "anyone";
+
+/** Who reads what a player types: friends in their chat group, anyone in it, or everyone (the only choice that crosses chat groups). */
+export type WhoReadsMyChat = "friends" | "my_age_band" | "everyone";
+
+/** How far one side of chat reaches: a sender's who_reads_my_chat, or whose chat a reader reads. */
+export type ChatReach = "nobody" | "friends" | "my_age_band" | "everyone";
+
+/**
+ * How far a pass's chat reaches, sending and reading. A pass with who_reads_my_chat says so directly (and reads
+ * everyone's chat unless chat_reading_enabled is false); a v1 pass's who_can_chat counts for both sides, as v1's
+ * two-way rule did (friends: friends; anyone: the chat group). Guests and unknown choices reach nobody.
+ */
+export function chatReachOf(claims: Pick<PassClaims, "kind" | "who_can_chat" | "who_reads_my_chat" | "chat_reading_enabled">): { sending: ChatReach; reading: ChatReach } {
+  if (claims.kind !== "account") return { sending: "nobody", reading: "nobody" };
+  if (claims.who_reads_my_chat !== undefined) {
+    const sending = (["friends", "my_age_band", "everyone"] as const).find((reach) => reach === claims.who_reads_my_chat) ?? "nobody";
+    return { sending, reading: claims.chat_reading_enabled === false ? "nobody" : "everyone" };
+  }
+  const reach: ChatReach = claims.who_can_chat === "friends" ? "friends" : claims.who_can_chat === "anyone" ? "my_age_band" : "nobody";
+  return { sending: reach, reading: reach };
+}
+
+/** Whether one side's reach takes in the other player: everyone; the same chat group; or a friend in it. */
+export function isWithinChatReach(reach: ChatReach, other: { isSameChatGroup: boolean; isFriend: boolean }): boolean {
+  if (reach === "everyone") return true;
+  if (reach === "my_age_band") return other.isSameChatGroup;
+  return reach === "friends" && other.isSameChatGroup && other.isFriend;
+}
 
 /** A pass's JWS header typ (RFC 8725 explicit typing): verifyPass refuses any other token (wrong_kind). */
 export const PASS_TOKEN_TYPE = "pass+jwt";
@@ -118,22 +159,20 @@ export function passesAreFriends(first: PassClaims, second: PassClaims): boolean
 }
 
 /**
- * Whether two players may chat, by the passes your server checked (verifyPass): both accounts in the same
- * chat group, no block between them, neither letting nobody chat, and either friends or both letting
- * anyone chat. Guests and accounts set to nobody never chat; accounts set to friends chat only with
- * friends (passesAreFriends); friends in different chat groups don't chat. Use it on every message your
- * own server delivers, text or voice; Zaisma's chat check (checkChat) applies the same rule, and so do
- * rooms (room.chat), on Zaisma and in the runner.
+ * Whether the first player's chat may reach the second: first is the sender, second the reader, and the order
+ * matters (ask both ways for a two-way check, like voice between two players). Both accounts, no block between
+ * them, the reader reads chat, and the sender's choice takes the reader in: everyone; anyone in the same chat
+ * group (My age band); or a friend in it (passesAreFriends). Guests never chat. Use it on every message your own
+ * server delivers, text or voice; Zaisma's chat check (checkChat) applies the same rule, and the witness rule on
+ * top (anyone under 18 types only where two independent players read it), and so do rooms (room.chat).
  */
 export function canChat(first: PassClaims, second: PassClaims): boolean {
   mustBePasses(first, second, "canChat");
   if (first.kind !== "account" || second.kind !== "account" || first.sub === second.sub) return false;
   if (passesHaveBlockBetween(first, second)) return false;
-  const isOpenTo = (whoCanChat: unknown) => whoCanChat === "friends" || whoCanChat === "anyone";
-  if (!isOpenTo(first.who_can_chat) || !isOpenTo(second.who_can_chat)) return false;
-  // Chat never leaves a chat group, friends included.
-  if (typeof first.chat_group_id !== "string" || first.chat_group_id !== second.chat_group_id) return false;
-  return passesAreFriends(first, second) || (first.who_can_chat === "anyone" && second.who_can_chat === "anyone");
+  if (typeof first.chat_group_id !== "string" || typeof second.chat_group_id !== "string") return false;
+  const other = { isSameChatGroup: first.chat_group_id === second.chat_group_id, isFriend: passesAreFriends(first, second) };
+  return isWithinChatReach(chatReachOf(first).sending, other) && isWithinChatReach(chatReachOf(second).reading, other);
 }
 
 export type PublicKey = JsonWebKey & { kid: string };
@@ -283,6 +322,9 @@ export async function verifyPass(token: string, keys: PublicKey[], expect: PassE
   if (claims.kind === "guest" && typeof claims.name !== "string") throw new PassError("malformed");
   if (claims.who_can_chat !== undefined && typeof claims.who_can_chat !== "string") throw new PassError("malformed");
   if (claims.chat_group_id !== undefined && typeof claims.chat_group_id !== "string") throw new PassError("malformed");
+  if (claims.who_reads_my_chat !== undefined && typeof claims.who_reads_my_chat !== "string") throw new PassError("malformed");
+  if (claims.chat_reading_enabled !== undefined && typeof claims.chat_reading_enabled !== "boolean") throw new PassError("malformed");
+  if (claims.network_seal !== undefined && typeof claims.network_seal !== "string") throw new PassError("malformed");
   if (claims.player_tag_id !== undefined && typeof claims.player_tag_id !== "string") throw new PassError("malformed");
   if (claims.friend_player_tag_ids !== undefined && !isStringList(claims.friend_player_tag_ids)) throw new PassError("malformed");
   if (claims.block_player_tag_ids !== undefined && !isStringList(claims.block_player_tag_ids)) throw new PassError("malformed");

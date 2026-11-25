@@ -1527,8 +1527,11 @@ interface Room {
   block(playerId: string): Promise<boolean>;
   /**
    * Report a player to Zaisma, with what happened in the player's own words if they gave any (details).
-   * The last chat lines (up to 20) they sent this player, or this player sent them, go with it from this
-   * screen; nothing else about the reporting player is sent.
+   * On Zaisma it opens Zaisma's report sheet beside the game, filled in with the player, reason and words,
+   * where the player picks the messages to send and sends it: only reports a player sends there count
+   * toward muting someone. Resolves once they send it; rejects with error.code "report_not_sent" when they
+   * close it without sending. Off Zaisma (a game's own site) the last chat lines (up to 20) they sent this
+   * player, or this player sent them, go with it; nothing else about the reporting player is sent.
    */
   report(playerId: string, reason: ReportReason, details?: string): Promise<ReportAnswer>;
   /**
@@ -2171,6 +2174,7 @@ type RequestErrorCode =
  * - slow_down: too many calls; try again in a minute.
  * - zaisma_rooms_not_used: the game doesn't use Zaisma rooms.
  * - bad_report: a report whose reason isn't a {@link ReportReason}, or whose player ID isn't one.
+ * - report_not_sent: the player closed Zaisma's report sheet, which {@link Room.report} opened, without sending it.
  * - bad_origin: the call didn't come from the game's own page.
  * - not_on_zaisma: the game is played off Zaisma, so it has no player passes, sign-in or room lists; joinRoom and server.request need {@link setUpOffZaisma} and a serverUrl.
  * - bad_game_slug: {@link setUpOffZaisma}'s gameSlug isn't a game slug: 1 to 40 lowercase letters, digits or hyphens.
@@ -2205,6 +2209,7 @@ type ErrorCode =
 ```ts
   | RoomErrorCode
   | RequestErrorCode
+  | "report_not_sent"
   | "chat_stopped"
   | "chat_not_allowed"
   | "chat_empty"
@@ -2326,7 +2331,7 @@ type ChatCheckReason = "contact_details" | "personal_details" | "slur" | "sexual
 
 ```ts
 /** What happened, in a player report. Zaisma looks at real_life_threat (a threat that reaches past the game: their real details, finding them, a plan), personal_details (sharing someone's), following_after_block and sexual (behavior); harassment, cheating and other go to the game's developer. */
-type ReportReason = "real_life_threat" | "personal_details" | "following_after_block" | "sexual" | "harassment" | "cheating" | "other";
+type ReportReason = "real_life_threat" | "personal_details" | "following_after_block" | "sexual" | "harassment" | "cheating" | "wrong_age" | "under_13" | "other";
 ```
 
 ### ReportAnswer

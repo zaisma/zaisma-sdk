@@ -1751,10 +1751,20 @@
     return blockAsk;
   }
   /**
-   * Report a player to Zaisma. reason: real_life_threat, personal_details, following_after_block or sexual (Zaisma looks), or harassment, cheating or other (passed to the game's developer).
-   * The last chat lines they sent you, or you sent them, go with it (up to 20); nothing else about you is sent.
+   * Report a player to Zaisma. reason: real_life_threat, personal_details, following_after_block, sexual, wrong_age or under_13 (Zaisma looks), or harassment, cheating or other (passed to the game's developer).
+   * On a Zaisma page it opens Zaisma's report sheet beside the game, filled in, and the player sends it there: only a report the
+   * player sends from Zaisma counts toward muting someone. Anywhere else the last chat lines they sent you, or you sent them,
+   * go with it (up to 20); nothing else about you is sent.
    */
   Room.prototype.report = function (playerId, reason, details) {
+    var reported = this.players.filter(function (each) { return each.id === playerId; })[0];
+    var room = this;
+    var sendDirectly = function () { return room._sendReport(playerId, reason, details); };
+    if (onZaismaPage() && this.roomCode) return askPageToReport(this.roomCode, { id: playerId, name: reported ? reported.name : "" }, reason, details || "", sendDirectly);
+    return sendDirectly();
+  };
+  /** A report straight to Zaisma's rooms, with the last chat lines: off Zaisma, or when the page has no report sheet. */
+  Room.prototype._sendReport = function (playerId, reason, details) {
     var reported = this.players.filter(function (each) { return each.id === playerId; })[0];
     var me = this.me ? this.me.id : null;
     var chatMessages = this._chatLines.filter(function (line) {
@@ -2843,6 +2853,49 @@
       room._setConnectionStatus("reconnecting");
       room._connect();
     });
+  });
+
+  /**
+   * Zaisma's report sheet, opened beside the game for room.report: resolves { isReported: true } once the player sends it, and rejects
+   * (report_not_sent) when they close it. A page that doesn't say it opened the sheet within REPORT_SHEET_WAIT_MS gets the report the
+   * way it goes off Zaisma instead (fallback), so room.report never hangs.
+   */
+  var REPORT_SHEET_WAIT_MS = 3000;
+  var reportAsks = {};
+  function askPageToReport(roomCode, player, reason, details, fallback) {
+    if (reportAsks[player.id]) return reportAsks[player.id];
+    reportAsks[player.id] = new Promise(function (resolve, reject) {
+      var isOpened = false;
+      var timer = setTimeout(function () { if (!isOpened) settle(function () { fallback().then(resolve, reject); }); }, REPORT_SHEET_WAIT_MS);
+      function settle(then) {
+        removeEventListener("message", onMessage);
+        clearTimeout(timer);
+        delete reportAsks[player.id];
+        then();
+      }
+      function onMessage(event) {
+        if (event.origin !== config.site || event.source !== window.parent || !event.data || event.data.playerId !== player.id) return;
+        if (event.data.type === "zaisma:report-opened") { isOpened = true; return; }
+        if (event.data.type !== "zaisma:report-done") return;
+        settle(function () {
+          if (event.data.isReported === true) resolve({ isReported: true });
+          else reject(codedError("report_not_sent", "The player closed Zaisma's report sheet without sending it."));
+        });
+      }
+      addEventListener("message", onMessage);
+      window.parent.postMessage({ type: "zaisma:report-player", code: roomCode, player: player, reason: typeof reason === "string" ? reason : "", details: String(details).slice(0, 2000) }, config.site);
+    });
+    return reportAsks[player.id];
+  }
+
+  // Zaisma's report sheet asks for a player's last chat lines on this screen, for the player to tick the ones to send.
+  window.addEventListener("message", function (event) {
+    if (!config.site || event.origin !== config.site || event.source !== window.parent || !event.data || event.data.type !== "zaisma:chat-lines-request") return;
+    var playerId = event.data.playerId, lines = [];
+    joined.forEach(function (room) {
+      room._chatLines.forEach(function (line) { if (line.fromPlayerId === playerId) lines.push({ fromPlayerId: line.fromPlayerId, text: line.text, sentAt: line.sentAt }); });
+    });
+    window.parent.postMessage({ type: "zaisma:chat-lines", id: event.data.id, playerId: playerId, lines: lines.slice(-REPORTED_CHAT_LINE_COUNT) }, config.site);
   });
 
   // The Zaisma page says when a player report was sent from its plate: mute them, as the panel's own form does.

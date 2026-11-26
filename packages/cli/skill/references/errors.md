@@ -305,6 +305,21 @@ Every error the developer API and MCP answer with, as `{ "error": { code, messag
 - `cloud_saves_not_here` (HTTP 409): Cloud saves don't work here: this is a tester link, or this Zaisma has no accounts. The game page answers it to `Zaisma.saves` and `Zaisma.player.offerAccount()`; no API or MCP call returns it. Fix: Test cloud saves on the game's zaisma.com page, signed in, not through a tester link. https://zaisma.com/developers/errors/cloud_saves_not_here
 - `save_busy` (HTTP 409): The player's game kept saving at the same moment, so the change didn't go through. Fix: Call again in a moment. https://zaisma.com/developers/errors/save_busy
 
+## The inbox
+
+- `no_inbox_notice` (HTTP 404): There's no notice with that ID in the account's inbox: deleted, past its 90 days, or never its own. Fix: List the inbox with list_inbox and use an inbox_notice_id it answers. https://zaisma.com/developers/errors/no_inbox_notice
+- `bad_inbox_section` (HTTP 400): inbox_section isn't for_you or your_games. Fix: Give inbox_section as for_you or your_games. https://zaisma.com/developers/errors/bad_inbox_section
+- `bad_is_read` (HTTP 400): is_read isn't true or false. Fix: Give is_read as true or false. https://zaisma.com/developers/errors/bad_is_read
+- `bad_is_archived` (HTTP 400): is_archived isn't true or false. Fix: Give is_archived as true or false. https://zaisma.com/developers/errors/bad_is_archived
+- `bad_turned_off_notice_kinds` (HTTP 400): turned_off_notice_kinds isn't a list of the inbox's kinds, or names account_security or legal, which always come. Fix: Give turned_off_notice_kinds as the whole list of kinds to turn off, from those list_inbox's notice_kinds says can_turn_off. https://zaisma.com/developers/errors/bad_turned_off_notice_kinds
+- `too_many_notices` (HTTP 429): The game sent 3 update and event notices in the last 7 days, the most a week takes. Fix: Send it once retry_after_sec has passed, or fold it into the next notice. https://zaisma.com/developers/errors/too_many_notices
+- `game_not_playable` (HTTP 409): The game isn't live and listed or unlisted, so nobody follows it to hear about an event. Fix: Publish a version and set visibility listed or unlisted with update_game, then announce the event. https://zaisma.com/developers/errors/game_not_playable
+- `bad_starts_at` (HTTP 400): starts_at isn't an ISO time from now to 90 days ahead. Fix: Give starts_at as an ISO time, like 2026-12-05T18:00:00Z, within the next 90 days. https://zaisma.com/developers/errors/bad_starts_at
+- `bad_ends_at` (HTTP 400): ends_at isn't an ISO time after starts_at and at most 30 days after it. Fix: Give ends_at as an ISO time after starts_at, at most 30 days later, or null for none. https://zaisma.com/developers/errors/bad_ends_at
+- `no_bug_report` (HTTP 404): The game has no bug report with that report_id from the last 90 days. Fix: Take a bug report's id from get_reports. https://zaisma.com/developers/errors/no_bug_report
+- `already_replied` (HTTP 409): The game's developer already replied to this bug report: one reply a report. Fix: Put what's new in the next update's patch notes instead. https://zaisma.com/developers/errors/already_replied
+- `bad_reply_text` (HTTP 400): reply_text isn't 1 to 1,000 characters of text that shows. Fix: Give reply_text as a short answer to the player, up to 1,000 characters. https://zaisma.com/developers/errors/bad_reply_text
+
 ## The developer forum
 
 - `no_topic` (HTTP 404): There's no topic with that ID you can see. Fix: Call search_forum for the topic's ID, then call again with it. https://zaisma.com/developers/errors/no_topic

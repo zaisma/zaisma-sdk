@@ -149,6 +149,7 @@ Every ID Zaisma makes says its kind in its value: `<kind>_<random>`, the kind in
 | `ban_match` (another account that paid with a card banned with an account, for a person at Zaisma to decide; only in the admin MCP) | `ban_match_…` |
 | `ncmec_report` (a report to NCMEC's CyberTipline; never shown outside Zaisma) | `ncmec_report_…` |
 | `admin_change` (a change the admin's AI asked for, waiting for the admin's passkey tap; never shown outside Zaisma) | `admin_change_…` |
+| `inbox_notice` (a notice in an account's inbox: from Zaisma, or a game the account follows) | `inbox_notice_…` |
 
 `ID_KINDS` (`packages/core/src/ids.ts`) is this list, and a test keeps the two in step; a new kind is added to both in the same change. Accounts' and guests' player IDs are both `player_…`, in their passes and everywhere the SDK and game server show them; an account's never changes, and Zaisma's own account ID (the sign-in's) never leaves Zaisma. The developer API and MCP still name a game by its `slug`, the link name developers know. Not IDs, and kept as they are: a `slug`, a `room_code` (six letters players type), API keys (`zsk_…`, a format secret scanners know), connected apps' access and refresh tokens (`zat_…`, `zrt_…`), webhook signing secrets (`whsec_…`, Standard Webhooks' form) and file hashes (`sha256`).
 

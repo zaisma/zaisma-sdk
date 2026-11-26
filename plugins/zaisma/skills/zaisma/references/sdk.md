@@ -1387,6 +1387,24 @@ interface Room {
    */
   readonly canChat: boolean;
   /**
+   * Whether this player can talk in voice ({@link Room.voice}): a Zaisma account whose voice setting reaches someone,
+   * playing (not watching). A player who can't talk can still join voice to listen.
+   */
+  readonly canTalk: boolean;
+  /**
+   * Voice in this room: your game holds the microphone, and Zaisma's room decides whose voices reach this player, by
+   * chat's rules (who each player lets hear them, blocks, mutes, and anyone under 18 only where two independent
+   * players hear them too), plus your server's teams and ranges (room.setVoiceGroup, setHeardSpeakers). It goes
+   * through Cloudflare's media server, so nobody sees anyone's address, and it's on your game's meter as voice.
+   * Each player hears up to 16 voices at once (your server can set 1 to 32), the loudest past that.
+   * @example
+   * await room.voice.join();
+   * room.on("speaking", ({ playerId, isSpeaking }) => showMicIcon(playerId, isSpeaking));
+   * // Proximity voice: fade and place each voice by distance.
+   * for (const other of room.players) room.voice.setSpeakerVolume(other.id, volumeByDistance(other));
+   */
+  readonly voice: RoomVoice;
+  /**
    * When Zaisma will end this match, an ISO time, or null: set once the game's hosting pauses for the
    * month, an hour after the pause (the "ending" event); null again if Zaisma calls the end off (the
    * "endingCancelled" event). Never set in a room on your own server.
@@ -1683,6 +1701,79 @@ interface RoomEvents {
    * them if your game doesn't. (Optional here only so games written for v1's events still fit.)
    */
   chat?: (chatMessage: ChatMessage) => void;
+  /** A voice started or stopped speaking, this player's own included, from its level on this device ({@link Room.voice}). */
+  speaking?: (speaking: Speaking) => void;
+  /** The voices this player hears changed: who's in {@link RoomVoice.speakerPlayerIds} now. */
+  voiceSpeakers?: (voiceSpeakers: { playerIds: string[] }) => void;
+}
+```
+
+### Speaking
+
+```ts
+/** The "speaking" event's answer. */
+interface Speaking {
+  playerId: string;
+  isSpeaking: boolean;
+}
+```
+
+### VoiceOptions
+
+```ts
+/** What {@link RoomVoice.join} takes. */
+interface VoiceOptions {
+  /** Join with the microphone muted (push-to-talk starts here). */
+  isMuted?: boolean;
+  /**
+   * For a room on your own server: a voice ticket your server signed (voiceTicket in @zaisma/game-server, with the
+   * game's ticket secret from create_ticket_secret), naming the voice channel and this player's team and range. Rooms
+   * on Zaisma need none.
+   */
+  ticket?: string;
+}
+```
+
+### RoomVoice
+
+```ts
+/** A room's voice: {@link Room.voice}. */
+interface RoomVoice {
+  /**
+   * Join the room's voice: asks for the microphone when the player can talk ({@link Room.canTalk}), else joins to
+   * listen. Resolves once connected; rejects with microphone_refused (the player or browser said no), voice_not_allowed
+   * (a guest or a spectator), voice_unavailable or hosting_paused. Call it from a tap or key press: browsers play
+   * sound only after one.
+   */
+  join(voiceOptions?: VoiceOptions): Promise<void>;
+  /** Leave voice: the microphone stops and nobody's voice comes. Leaving the room does it too. */
+  leave(): void;
+  /** On your own server: new rules for this player (a team switch, a range), as a new ticket from your server for the same channel. */
+  updateTicket(ticket: string): void;
+  /** Mute or unmute this player's microphone, for push-to-talk or a mute button. Muted, it sends almost nothing. */
+  setMicrophoneMuted(isMuted: boolean): void;
+  /** A voice's volume here, 0 to 100 (100 unless you set it), for proximity voice or a volume slider. At 0 it isn't sent at all. */
+  setSpeakerVolume(playerId: string, volumePct: number): void;
+  /** Where a voice sits left to right, -100 (left) to 100 (right), 0 unless you set it. */
+  setSpeakerPan(playerId: string, panPct: number): void;
+  /**
+   * A voice's sound after its volume, for your own effects (a radio's crackle, a muffled wall): disconnect it and
+   * connect it through your own nodes to {@link RoomVoice.outputNode}. Null while that voice isn't heard.
+   */
+  audioNodeOf(playerId: string): AudioNode | null;
+  /** The Web Audio context voices play through, or null before joining. */
+  readonly audioContext: AudioContext | null;
+  /**
+   * Where voices go to the speakers, in {@link RoomVoice.audioContext}, or null before joining. Echo cancellation
+   * hears what plays through it, so the microphone doesn't send it back: connect your effects here, not to the
+   * context's destination, and your game's own sound too, made in this context, while players talk on speakers.
+   */
+  readonly outputNode: AudioNode | null;
+  /** The players whose voices reach this player now (the "voiceSpeakers" event says when it changes). */
+  readonly speakerPlayerIds: readonly string[];
+  readonly isJoined: boolean;
+  /** Whether this player can talk, as {@link Room.canTalk}. */
+  readonly canTalk: boolean;
 }
 ```
 
@@ -2083,6 +2174,7 @@ interface RoomError {
  * - spectator_cannot_send: a spectator tried to send to the room ({@link Room.send}, {@link Room.sendBytes}).
  * - send_queue_full: the SDK's own: more than 60 reliable sends waited while the room wasn't reachable, so the oldest were dropped. Send less while connectionStatus isn't open, or use latest_only for updates that replace each other.
  * - chat_not_allowed, chat_empty, chat_too_long, chat_too_fast: {@link Room.chat} refused (they reject its promise, not the "error" event); chat_not_here: the room's server doesn't take chat.
+ * - microphone_refused, voice_not_allowed, voice_unavailable: {@link RoomVoice.join} refused (they reject its promise); after joining, the "error" event says when voice stopped. voice_not_here: the room's server doesn't take voice. voice_ticket_required, voice_ticket_refused: on your own server, join needs a ticket your server signed, for this player and game, not expired.
  *
  * More codes may come within v1: handle one you don't know like an error you can show (its message).
  *
@@ -2124,7 +2216,13 @@ type RoomErrorCode =
   | "chat_not_allowed"
   | "chat_empty"
   | "chat_too_long"
-  | "chat_too_fast";
+  | "chat_too_fast"
+  | "voice_not_here"
+  | "microphone_refused"
+  | "voice_not_allowed"
+  | "voice_unavailable"
+  | "voice_ticket_required"
+  | "voice_ticket_refused";
 
 /**
  * The codes a request's errors have ({@link Server.request}), from Zaisma or the Node runner alike:

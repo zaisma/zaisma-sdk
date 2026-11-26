@@ -2,7 +2,7 @@
 // (bench/glass.ts) and one frame, the player's page, which is zaisma.com's game page with its own scripts. These never reach into it.
 
 /** What the dev page's frame lets the player's page pass on to the game: the game page's own list (apps/site/src/pages.ts; test/node/local-play-parity.test.ts holds the two together). */
-export const FRAME_ALLOW = "fullscreen; gamepad; autoplay; web-share; clipboard-write; cross-origin-isolated; compute-pressure";
+export const FRAME_ALLOW = "fullscreen; gamepad; autoplay; web-share; clipboard-write; cross-origin-isolated; compute-pressure; microphone";
 
 /** The dev page's script: it keeps the player's place, reloads the game when a file changes, runs the dev bar's menus and the Players panel. */
 export const devScriptSource = () => `(${devScript.toString()})();\n`;

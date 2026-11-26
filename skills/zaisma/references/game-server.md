@@ -313,7 +313,7 @@ Zaisma.joinRoom({ idleCheckEnabled: false }); // no "Still there?" in this game 
 
 Every number behind this (pings, timeouts, reconnecting, held seats, message limits, close codes) is in [Room connections](docs/DEVELOPER-API.md#room-connections).
 
-Your own clients follow the same protocol: send the text `ping` every 30 seconds or so (the room answers `pong`), `{"type":"idle"}`, `{"type":"hidden"}` and `{"type":"shown"}` as they happen, and `{"type":"back"}` when the player returns. Their hello carries `"protocolVersionNumber":1`. Errors from the room are `{"type":"error","code":"room_full","message":"This room is full."}`, with codes in lowercase snake_case, one of: `rented_share_used`, `room_full`, `room_closed`, `ended`, `too_big`, `too_fast`, `bad_message`, `bad_pass`, `bad_player_token`, `no_hello`, `not_allowed`, `game_unavailable`, `busy`, `kept_out`, `refused`, `room_not_running`, `hosting_paused`, `account_needed`, `game_not_open_to_player`, `blocked_player_here`, `other_version`, `spectators_full`, `spectator_cannot_send`, `already_playing`, `bad_origin`, `send_queue_full`, `chat_not_here`, `chat_not_allowed`, `chat_empty`, `chat_too_long` or `chat_too_fast`. The SDK's types explain each one (`RoomErrorCode`); codes only grow within v1.
+Your own clients follow the same protocol: send the text `ping` every 30 seconds or so (the room answers `pong`), `{"type":"idle"}`, `{"type":"hidden"}` and `{"type":"shown"}` as they happen, and `{"type":"back"}` when the player returns. Their hello carries `"protocolVersionNumber":1`. Errors from the room are `{"type":"error","code":"room_full","message":"This room is full."}`, with codes in lowercase snake_case, one of: `rented_share_used`, `room_full`, `room_closed`, `ended`, `too_big`, `too_fast`, `bad_message`, `bad_pass`, `bad_player_token`, `no_hello`, `not_allowed`, `game_unavailable`, `busy`, `kept_out`, `refused`, `room_not_running`, `hosting_paused`, `account_needed`, `game_not_open_to_player`, `blocked_player_here`, `other_version`, `spectators_full`, `spectator_cannot_send`, `already_playing`, `bad_origin`, `send_queue_full`, `chat_not_here`, `voice_not_here`, `chat_not_allowed`, `chat_empty`, `chat_too_long` or `chat_too_fast`. The SDK's types explain each one (`RoomErrorCode`); codes only grow within v1.
 
 #### Requests to your game server
 
@@ -557,6 +557,12 @@ A room answers a refusal with `{ type: "error", code, message }`, then closes th
 | `chat_empty` | `room.chat` with nothing but spaces. |
 | `chat_too_long` | `room.chat` over 2000 characters. |
 | `chat_too_fast` | More than 20 chat messages in 10 seconds from one player. |
+| `voice_not_here` | A voice message reached a room whose server doesn't take voice (your own server: voice goes through a ticket, see Voice). |
+| `microphone_refused` | The SDK's own: `room.voice.join` couldn't use the microphone (the player or the browser said no). |
+| `voice_not_allowed` | `room.voice.join` from a guest or a spectator. |
+| `voice_unavailable` | Voice couldn't start or connect: try again. |
+| `voice_ticket_required` | `room.voice.join` in a room on your own server without a ticket from that server. |
+| `voice_ticket_refused` | A voice ticket for another player, channel or game, expired, or signed with another secret. |
 | `bad_region` | The SDK's own: a `region` that isn't a continent code (`"AF"`, `"AN"`, `"AS"`, `"EU"`, `"NA"`, `"OC"` or `"SA"`). |
 | `bad_idle_timeout` | The SDK's own: an `idleTimeoutSec` that isn't from 30 to 86400. |
 | `bad_transport` | The SDK's own: a `transport` that isn't `"websocket"` or `"webtransport"`. |
@@ -603,5 +609,7 @@ Every event the game's room object has, and what its listener gets. Within v1, e
 | `error` | `{ code, message }` |
 | `versionUpdate` | `{ versionId, appliesAt, isReloading }` |
 | `roomMessage` | `{ message, senderKind, fromRoomCode, sentAt }`: a room message for a room whose game server has no `onRoomMessage` (see Reaching live rooms) |
+| `speaking` | `{ playerId, isSpeaking }`: a voice started or stopped speaking, this player's own included (see Voice) |
+| `voiceSpeakers` | `{ playerIds }`: whose voices reach this player now changed |
 
 The SDK and rooms say which messages they speak with `protocolVersionNumber` (1 today): the SDK sends it in its hello, and the welcome answers the room's. A room skips a message type it doesn't know, so a newer SDK still plays in an older room.

@@ -15,6 +15,11 @@ export interface RoomCallLimits {
   maximumLabelCount: number;
   /** A room message (room.sendToRoom, room.sendToEveryRoom) as JSON: ROOM_MESSAGE_LIMITS has it. */
   maximumRoomMessageSizeBytes: number;
+  /** Players in one room: ROOM_LIMITS has it. And voice's (room.setVoiceGroup, setHeardSpeakers, setHeardSpeakerCount): VOICE_ROOM_LIMITS has them. */
+  maximumPlayerCount: number;
+  defaultHeardSpeakerCount: number;
+  maximumHeardSpeakerCount: number;
+  maximumVoiceGroupNameCharacterCount: number;
 }
 
 /** The error a mistake in a room call throws: GameServerError, or the sandbox's copy of it. */
@@ -76,6 +81,10 @@ export interface RoomCallChecks {
   checkBroadcastBytes(bytes: unknown, broadcastOptions: unknown): CheckedBroadcast & { bytes: Uint8Array };
   checkSendBytes(playerId: unknown, bytes: unknown, sendOptions: unknown): CheckedSend & { playerId: string; bytes: Uint8Array };
   checkKick(playerId: unknown, kickOptions: unknown): { playerId: string; message: string; isKeptOut: boolean };
+  checkPlayerId(playerId: unknown, call: string): string;
+  checkPlayerIds(playerIds: unknown, call: string): string[] | null;
+  checkVoiceGroupName(groupName: unknown, call: string): string | null;
+  checkHeardSpeakerCount(heardSpeakerCount: unknown, call: string): number;
   checkReserve(reserveOptions: unknown, playerIdsInRoom: readonly string[]): CheckedReserve;
   checkMoveTo(toRoomCode: unknown, moveOptions: unknown, playerIdsInRoom: readonly string[]): CheckedMove & { toRoomCode: string };
   checkSetInfo(nameAndLabels: unknown): { name?: string | null; labels?: Record<string, string> };
@@ -243,6 +252,22 @@ function roomCallChecksParts(): RoomCallChecksParts {
       return { playerId: readText(playerId, "playerId", "room.kick"), message: tidy(given.message, limits.maximumKickMessageCharacterCount), isKeptOut: given.keepOut === true };
     };
 
+    const checkPlayerId = (playerId: unknown, call: string) => readText(playerId, "playerId", call);
+    const checkPlayerIds = (playerIds: unknown, call: string): string[] | null => {
+      if (playerIds === null) return null;
+      if (!Array.isArray(playerIds) || playerIds.length > limits.maximumPlayerCount || playerIds.some((playerId) => typeof playerId !== "string" || !playerId)) throw mistake(call, `${call} needs a list of player IDs, up to ${limits.maximumPlayerCount}, or null.`, "Give player IDs from room.players, or null for everyone.");
+      return [...new Set(playerIds as string[])];
+    };
+    const checkVoiceGroupName = (groupName: unknown, call: string): string | null => {
+      if (groupName === null) return null;
+      if (typeof groupName !== "string" || !groupName.length || groupName.length > limits.maximumVoiceGroupNameCharacterCount) throw mistake(call, `${call} needs a group name of 1 to ${limits.maximumVoiceGroupNameCharacterCount} characters, or null.`, 'Give a name like "red", or null for no group.');
+      return groupName;
+    };
+    const checkHeardSpeakerCount = (heardSpeakerCount: unknown, call: string): number => {
+      if (typeof heardSpeakerCount !== "number" || !Number.isInteger(heardSpeakerCount) || heardSpeakerCount < 1 || heardSpeakerCount > limits.maximumHeardSpeakerCount) throw mistake(call, `${call} needs a whole number from 1 to ${limits.maximumHeardSpeakerCount}.`, `Give how many voices each player hears at once; ${limits.defaultHeardSpeakerCount} is the default.`);
+      return heardSpeakerCount;
+    };
+
     const checkReserve = (reserveOptions: unknown, playerIdsInRoom: readonly string[]): CheckedReserve => {
       const given = closed(reserveOptions, ["playerIds", "setupData", "isListed", "friendJoinsEnabled", "isKept", "name", "labels"], "room.reserve");
       const playerIds = [...new Set(Array.isArray(given.playerIds) ? given.playerIds : [])].filter((id): id is string => typeof id === "string" && playerIdsInRoom.includes(id));
@@ -347,7 +372,7 @@ function roomCallChecksParts(): RoomCallChecksParts {
       return found;
     };
 
-    return { checkBroadcast, checkSend, checkBroadcastBytes, checkSendBytes, checkKick, checkReserve, checkMoveTo, checkSetInfo, checkEnd, checkRestoreToAt, checkKeptRoomRestoreId, keptRoomRestoreOf, keptRoomRestoreListOf, checkSendToRoom, checkSendToEveryRoom, checkRoomSelection, tidy, tidyRoomInfo, checkRoomData, readDataFile };
+    return { checkBroadcast, checkSend, checkBroadcastBytes, checkSendBytes, checkKick, checkPlayerId, checkPlayerIds, checkVoiceGroupName, checkHeardSpeakerCount, checkReserve, checkMoveTo, checkSetInfo, checkEnd, checkRestoreToAt, checkKeptRoomRestoreId, keptRoomRestoreOf, keptRoomRestoreListOf, checkSendToRoom, checkSendToEveryRoom, checkRoomSelection, tidy, tidyRoomInfo, checkRoomData, readDataFile };
   }
 
   return { checksFor };

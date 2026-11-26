@@ -37,7 +37,30 @@
   /** A fast lane that isn't up in this long gives way to the WebSocket, for the rest of the room's life. */
   var FAST_LANE_CONNECT_TIMEOUT_MS = 3000;
   var ROOM_INFO_FIELDS = ["name", "labels"];
-  var ROOM_EVENTS = ["message", "bytes", "state", "players", "connectionStatus", "ended", "ending", "endingCancelled", "kicked", "settings", "move", "moved", "idle", "away", "back", "muted", "error", "versionUpdate", "chat", "roomMessage"];
+  var ROOM_EVENTS = ["message", "bytes", "state", "players", "connectionStatus", "ended", "ending", "endingCancelled", "kicked", "settings", "move", "moved", "idle", "away", "back", "muted", "error", "versionUpdate", "chat", "roomMessage", "speaking", "voiceSpeakers"];
+  /** Voice (room.voice): what the SDK sends (Opus mono, packets this long), when a voice counts as speaking, and the report clip. Zaisma's VOICE_LIMITS has the same. */
+  var VOICE_JOIN_OPTIONS = ["isMuted", "ticket"];
+  var VOICE_BITRATE_BITS_PER_SEC = 24000;
+  var VOICE_PACKET_DURATION_MS = 40;
+  var VOICE_SPEAKING_LEVEL_PCT = 30;
+  var VOICE_SPEAKING_HOLD_MS = 300;
+  var VOICE_LEVEL_REPORT_INTERVAL_MS = 1000;
+  var VOICE_REPORT_AUDIO_DURATION_SEC = 30;
+  var VOICE_MAXIMUM_REPORT_AUDIO_SIZE_BYTES = 1000000;
+  var VOICE_MAXIMUM_TRANSCEIVER_COUNT = 40;
+  /** On a game's own server, a fresh pass goes on the voice channel this often: a pass lasts an hour. */
+  var VOICE_PASS_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+  /** Fresh sessions tried in a row after a voice connection fails, before the player is told. */
+  var VOICE_MAXIMUM_RECONNECT_COUNT = 3;
+  var VOICE_ERROR_TEXT = {
+    voice_not_allowed: "Voice isn't open to this player here.",
+    voice_unavailable: "Voice isn't available right now.",
+    voice_ticket_required: "On its own server, a game's voice needs a ticket from that server.",
+    voice_ticket_refused: "The voice ticket was refused: ask the game's server for a new one.",
+    hosting_paused: "This game's online play is paused, voice included.",
+    rented_share_used: "Voice isn't available from this network right now.",
+    busy: "Voice is busy. Try again in a minute.",
+  };
   /** Chat (room.chat): the longest message, the lines a room keeps in memory for reports, and how many of them a report carries. */
   var MAXIMUM_CHAT_CHARACTER_COUNT = 2000;
   var KEPT_CHAT_LINE_COUNT = 50;
@@ -102,6 +125,15 @@
   var offZaisma = null;
 
   /** An Error with a code, as the SDK's errors all have. */
+  /** A blob as base64, for a JSON body. */
+  function blobBase64(blob) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(String(reader.result).slice(String(reader.result).indexOf(",") + 1)); };
+      reader.onerror = function () { reject(reader.error); };
+      reader.readAsDataURL(blob);
+    });
+  }
   function codedError(code, message) {
     var error = new Error(message);
     error.code = code;
@@ -616,6 +648,9 @@
     this._chatNumber = 0;
     this._chats = new Map();
     this._chatLines = [];
+    // Voice (room.voice): whether this player can talk (from welcome), and the room's voice.
+    this.canTalk = false;
+    this.voice = new RoomVoice(this);
   }
   Room.prototype = Object.create(Emitter.prototype);
 
@@ -868,6 +903,9 @@
         room._probeIntervalSec = typeof message.probeIntervalSec === "number" ? message.probeIntervalSec : null;
         room.spectatorCount = typeof message.spectatorCount === "number" ? message.spectatorCount : 0;
         room.canChat = message.canChat === true && !room.isSpectator;
+        room.canTalk = (typeof message.canTalk === "boolean" ? message.canTalk : message.canChat === true) && !room.isSpectator;
+        // Back after a lost connection: voice starts again on the new one.
+        if (room.voice._wantsJoin && !room.voice._joinWaiter) room.voice._rejoin();
         // A room that doesn't say so (an older game server of the game's own) gets one message a frame, as before.
         room._canCombine = message.canCombineMessages === true;
         // A new connection: the first latest-only send of each kind goes, whatever went before.
@@ -926,6 +964,8 @@
         room._emit("message", message.data, typeof message.fromPlayerId === "string" ? message.fromPlayerId : null);
       } else if (message.type === "chat" || message.type === "chat_sent" || message.type === "chat_stopped" || (message.type === "error" && typeof message.chatNumber === "number")) {
         room._chatAnswer(message);
+      } else if (message.type === "voice") {
+        room.voice._answer(message);
       } else if (message.type === "state") {
         room._takeState(message);
       } else if (message.type === "room") {
@@ -1603,7 +1643,9 @@
   Room.prototype._mutedChanged = function () {
     var room = this;
     var hidden = new Set(Array.from(this._muted || []).concat(Array.from(blockedSet()), Array.from(lastingBlocked), Array.from(this._blocks || [])));
-    this._emit("muted", Array.from(hidden).filter(function (playerId) { return !room.me || playerId !== room.me.id; }));
+    var mutedPlayerIds = Array.from(hidden).filter(function (playerId) { return !room.me || playerId !== room.me.id; });
+    this.voice._mutedChanged(mutedPlayerIds);
+    this._emit("muted", mutedPlayerIds);
     this._tellPage();
   };
   /**
@@ -1770,7 +1812,11 @@
     var chatMessages = this._chatLines.filter(function (line) {
       return line.fromPlayerId === playerId || (line.fromPlayerId === me && (!line.toPlayerIds || line.toPlayerIds.indexOf(playerId) !== -1));
     }).slice(-REPORTED_CHAT_LINE_COUNT).map(function (line) { return { fromPlayerId: line.fromPlayerId, text: line.text, sentAt: line.sentAt }; });
-    return post("/v1/report", { gameSlug: config.game, roomCode: this.roomCode, playerId: playerId, playerName: reported ? reported.name : "", reason: reason, details: details || "", chatMessages: chatMessages });
+    var report = { gameSlug: config.game, roomCode: this.roomCode, playerId: playerId, playerName: reported ? reported.name : "", reason: reason, details: details || "", chatMessages: chatMessages };
+    var clip = this.voice._reportClip();
+    if (!clip) return post("/v1/report", report);
+    // The last 30 seconds of voice this player heard go with it.
+    return blobBase64(clip).then(function (voiceClipBase64) { report.voiceClipBase64 = voiceClipBase64; return post("/v1/report", report); });
   };
 
   /**
@@ -1834,7 +1880,462 @@
     waiting.forEach(function (chat) { chat.reject(codedError("connection_closed", "The room closed before the message went.")); });
   };
 
+  /**
+   * Voice in a room (zaisma.d.ts: room.voice; PL39). The game holds the microphone; Zaisma's room decides whose voices
+   * reach this player through Cloudflare's media server, by the same rules as chat, and the SDK plays them, each through
+   * its own volume and left-right, which the game can replace with its own effects (audioNodeOf). Nothing of voice is
+   * kept, except the last 30 seconds this player heard, in memory only, which go with a report they send.
+   */
+  function RoomVoice(room) {
+    this._room = room;
+    this.isJoined = false;
+    this.speakerPlayerIds = [];
+    this.audioContext = null;
+    this.outputNode = null;
+    this._outputElement = null;
+    this._pc = null;
+    this._microphone = null;
+    this._isMicrophoneMuted = false;
+    this._wantsJoin = false;
+    this._joinWaiter = null;
+    this._joinAttemptNumber = 0;
+    this._playerIdByMid = new Map();
+    this._speakers = new Map();
+    this._volumePct = new Map();
+    this._panPct = new Map();
+    this._levelTimer = null;
+    this._ownLevel = { isSpeaking: false, levelPct: 0, sentAtMs: 0 };
+    this._clip = null;
+  }
+  Object.defineProperty(RoomVoice.prototype, "canTalk", { get: function () { return this._channel ? this._channelCanTalk === true : this._room.canTalk === true; } });
+
+  /** The channel a voice ticket names (its server signed it; Zaisma checks it), or null. */
+  function voiceTicketChannel(ticket) {
+    try {
+      var claims = JSON.parse(atob(String(ticket).split(".")[0].replace(/-/g, "+").replace(/_/g, "/")));
+      return typeof claims.channel_name === "string" && /^[a-z0-9_:-]{1,40}$/.test(claims.channel_name) ? claims.channel_name : null;
+    } catch (error) {
+      return null;
+    }
+  }
+  /** A voice channel on Zaisma for a room on the game's own server: the player's pass and the ticket go first. */
+  RoomVoice.prototype._openChannel = function () {
+    var voice = this;
+    var room = this._room;
+    if (!config.rooms) return Promise.reject(codedError("voice_unavailable", "Voice goes through Zaisma, so it works only in games played on Zaisma."));
+    return getPass().then(function (given) {
+      return new Promise(function (resolve, reject) {
+        var socket = new WebSocket(config.rooms.replace(/^http/, "ws") + "/v1/voice/" + config.game + "/" + voiceTicketChannel(voice._ticket));
+        voice._channel = socket;
+        var isWelcomed = false;
+        socket.onopen = function () { socket.send(JSON.stringify({ type: "hello", pass: given.pass, ticket: voice._ticket })); };
+        socket.onmessage = function (event) {
+          var message;
+          try { message = JSON.parse(event.data); } catch (error) { return; }
+          if (message.type === "welcome") {
+            isWelcomed = true;
+            voice._channelCanTalk = message.canTalk === true;
+            // A pass lasts an hour: a fresh one goes on the channel well before, so a long match keeps its voice.
+            voice._passTimer = setInterval(function () {
+              getPass().then(function (fresh) { if (voice._channel === socket) socket.send(JSON.stringify({ type: "voice", action: "pass", pass: fresh.pass })); }, function () {});
+            }, VOICE_PASS_REFRESH_INTERVAL_MS);
+            return resolve();
+          }
+          if (message.type === "voice") {
+            if (!isWelcomed && message.action === "error") return reject(codedError(message.code, VOICE_ERROR_TEXT[message.code] || "Voice isn't available right now."));
+            voice._answer(message);
+          }
+        };
+        socket.onclose = function () {
+          if (voice._channel !== socket) return;
+          voice._channel = null;
+          if (!isWelcomed) return reject(codedError("voice_unavailable", VOICE_ERROR_TEXT.voice_unavailable));
+          // Lost: start again on a new connection, with the ticket kept (the server sends a fresh one when it's old).
+          if (voice._wantsJoin && !room._done) voice._rejoin();
+        };
+      });
+    });
+  };
+  /** New rules from the game's own server (a team switch, a range): a new ticket on the open channel. */
+  RoomVoice.prototype.updateTicket = function (ticket) {
+    if (typeof ticket !== "string" || voiceTicketChannel(ticket) !== voiceTicketChannel(this._ticket)) throw codedError("voice_ticket_refused", "room.voice.updateTicket takes a ticket for the channel this player joined.");
+    this._ticket = ticket;
+    // With a fresh pass, so what the player's account says now applies too.
+    var voice = this;
+    getPass().then(function (given) { voice._sendVoice({ action: "ticket", ticket: ticket, pass: given.pass }); }, function () { voice._sendVoice({ action: "ticket", ticket: ticket }); });
+  };
+
+  RoomVoice.prototype.join = function (voiceOptions) {
+    var refused = unknownOption(voiceOptions, VOICE_JOIN_OPTIONS, "room.voice.join");
+    if (refused) return Promise.reject(refused);
+    var voice = this;
+    var room = this._room;
+    if (room._done || room.isSpectator || !room.me || room.me.kind !== "account") return Promise.reject(codedError("voice_not_allowed", "Voice is for players signed in to Zaisma."));
+    if (typeof RTCPeerConnection !== "function" || typeof AudioContext !== "function") return Promise.reject(codedError("voice_unavailable", "This browser can't do voice."));
+    if (this._joinWaiter) return this._joinWaiter.promise;
+    if (this.isJoined) return Promise.resolve();
+    // A room on the game's own server talks through a voice channel on Zaisma, joined with a ticket that server signed.
+    var ticket = voiceOptions && voiceOptions.ticket;
+    if (room._serverUrl && !ticket) return Promise.reject(codedError("voice_ticket_required", VOICE_ERROR_TEXT.voice_ticket_required));
+    if (ticket !== undefined && (typeof ticket !== "string" || !voiceTicketChannel(ticket))) return Promise.reject(codedError("voice_ticket_refused", VOICE_ERROR_TEXT.voice_ticket_refused));
+    this._ticket = ticket || null;
+    this._isMicrophoneMuted = Boolean(voiceOptions && voiceOptions.isMuted);
+    this._wantsJoin = true;
+    // Made and woken here, inside the player's tap: made later, after the microphone's prompt, browsers keep it silent.
+    if (!this.audioContext) this.audioContext = new AudioContext();
+    if (!this.outputNode) {
+      // Voices reach the speakers through a media element, not the context's own output: echo cancellation hears what
+      // media elements play (on phones, only that), so the microphone doesn't send the voices back. The game's own sound
+      // can come this way too (outputNode).
+      var output = this.audioContext.createMediaStreamDestination();
+      this._outputElement = new Audio();
+      this._outputElement.srcObject = output.stream;
+      this.outputNode = output;
+      this._unlockSoundOnTap();
+    }
+    this._wakeSound();
+    var attemptNumber = ++this._joinAttemptNumber;
+    var isCurrent = function () { return voice._joinAttemptNumber === attemptNumber && voice._wantsJoin; };
+    var waiter = {};
+    waiter.promise = new Promise(function (resolve, reject) { waiter.resolve = resolve; waiter.reject = reject; });
+    this._joinWaiter = waiter;
+    (this._ticket ? this._openChannel() : Promise.resolve())
+      .then(function () { return voice.canTalk ? navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } }).catch(function (error) {
+        // Only a no from the player or the browser is a refusal; no microphone, or one another app holds, says so.
+        if (error && error.name === "NotFoundError") throw codedError("voice_unavailable", "No microphone was found. Plug one in, or join to listen.");
+        if (error && error.name === "NotReadableError") throw codedError("voice_unavailable", "The microphone is busy in another app. Close it there and try again.");
+        throw codedError("microphone_refused", "The browser didn't let the game use the microphone. Allow it for this site, then join again.");
+      }) : null; })
+      .then(function (microphone) {
+        // Left while the browser asked: the microphone is let go at once, never kept.
+        if (!isCurrent()) {
+          if (microphone) microphone.getTracks().forEach(function (track) { track.stop(); });
+          return;
+        }
+        return voice._connect(microphone);
+      })
+      .catch(function (error) { if (isCurrent()) voice._failJoin(error && error.code ? error : codedError("voice_unavailable", "Voice couldn't start. Try again.")); });
+    return waiter.promise;
+  };
+
+  RoomVoice.prototype._connect = function (microphone) {
+    var voice = this;
+    this._microphone = microphone;
+    var pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }], bundlePolicy: "max-bundle" });
+    this._pc = pc;
+    pc.ontrack = function () { voice._wire(); };
+    // A connection that fails (a network change, a media server hiccup) starts a fresh session, up to 3 times in a row;
+    // after that the player hears why, rather than sitting in a silent voice.
+    pc.onconnectionstatechange = function () {
+      if (voice._pc !== pc) return;
+      if (pc.connectionState === "connected") voice._failedConnectionCount = 0;
+      if (pc.connectionState !== "failed") return;
+      voice._failedConnectionCount = (voice._failedConnectionCount || 0) + 1;
+      if (voice._failedConnectionCount > VOICE_MAXIMUM_RECONNECT_COUNT) {
+        voice._failedConnectionCount = 0;
+        voice._wantsJoin = false;
+        // The room drops the dead session, so nobody keeps pulling it.
+        voice._sendVoice({ action: "leave" });
+        return voice._failJoin(codedError("voice_unavailable", "Voice couldn't connect. Check the connection and join again."));
+      }
+      voice._rejoin();
+    };
+    if (!microphone) return voice._sendVoice({ action: "join" });
+    var track = microphone.getAudioTracks()[0];
+    track.enabled = !this._isMicrophoneMuted;
+    var transceiver = pc.addTransceiver(track, { direction: "sendonly" });
+    this._watchOwnLevel(microphone);
+    return pc.createOffer().then(function (offer) {
+      // Opus mono at 24 kbps in 40 ms packets, silent when the player is: about 33 kbps talking and 1 kbps silent, on the wire.
+      var sdp = offer.sdp.replace(/a=fmtp:111 ([^\r\n]*)/, "a=fmtp:111 $1;usedtx=1;useinbandfec=1;stereo=0;maxaveragebitrate=" + VOICE_BITRATE_BITS_PER_SEC).replace(/(m=audio[^\r\n]*\r\n)/, "$1a=ptime:" + VOICE_PACKET_DURATION_MS + "\r\n");
+      return pc.setLocalDescription({ type: "offer", sdp: sdp }).then(function () { voice._sendVoice({ action: "join", offerSdp: sdp, mid: transceiver.mid }); });
+    });
+  };
+
+  RoomVoice.prototype._failJoin = function (error) {
+    var waiter = this._joinWaiter;
+    this._joinWaiter = null;
+    this._close();
+    if (waiter) waiter.reject(error);
+    else this._room._emit("error", { code: error.code, message: error.message });
+  };
+
+  /** What the room said about voice. */
+  RoomVoice.prototype._answer = function (message) {
+    var voice = this;
+    var pc = this._pc;
+    if (message.action === "error") return this._failJoin(codedError(typeof message.code === "string" ? message.code : "voice_unavailable", VOICE_ERROR_TEXT[message.code] || "Voice isn't available right now."));
+    if (!pc) return;
+    if (message.action === "joined") {
+      var done = function () {
+        voice.isJoined = true;
+        var waiter = voice._joinWaiter;
+        voice._joinWaiter = null;
+        if (waiter) waiter.resolve();
+      };
+      if (typeof message.answerSdp === "string") pc.setRemoteDescription({ type: "answer", sdp: message.answerSdp }).then(done, function () { voice._failJoin(codedError("voice_unavailable", "Voice couldn't connect.")); });
+      else done();
+    } else if (message.action === "offer" && typeof message.offerSdp === "string") {
+      pc.setRemoteDescription({ type: "offer", sdp: message.offerSdp })
+        .then(function () { return pc.createAnswer(); })
+        .then(function (answer) { return pc.setLocalDescription(answer).then(function () { voice._sendVoice({ action: "answer", answerSdp: answer.sdp }); }); })
+        .catch(function () { voice._rejoin(); });
+    } else if (message.action === "tracks" && Array.isArray(message.tracks)) {
+      this._playerIdByMid = new Map(message.tracks.filter(function (track) { return track && typeof track.mid === "string" && typeof track.playerId === "string"; }).map(function (track) { return [track.mid, track.playerId]; }));
+      this._wire();
+      // A long session's description grows with every voice pulled: past this many, start a fresh one.
+      if (pc.getTransceivers().length > VOICE_MAXIMUM_TRANSCEIVER_COUNT) this._rejoin();
+    }
+  };
+
+  /** Each voice pulled now, through its own volume and left-right to the speakers, and into the report clip's mix. */
+  RoomVoice.prototype._wire = function () {
+    var voice = this;
+    var audioContext = this.audioContext;
+    if (!this._pc || !audioContext) return;
+    var heard = new Set();
+    this._pc.getTransceivers().forEach(function (transceiver) {
+      var playerId = transceiver.mid !== null ? voice._playerIdByMid.get(transceiver.mid) : undefined;
+      if (!playerId || transceiver.direction === "sendonly" || !transceiver.receiver.track) return;
+      heard.add(playerId);
+      var speaker = voice._speakers.get(playerId);
+      if (speaker && speaker.track === transceiver.receiver.track) return;
+      if (speaker) voice._unwire(playerId);
+      var stream = new MediaStream([transceiver.receiver.track]);
+      // Chrome plays a remote voice into Web Audio only while a media element holds it too; the element itself stays silent.
+      var element = new Audio();
+      element.muted = true;
+      element.srcObject = stream;
+      element.play().catch(function () {});
+      var source = audioContext.createMediaStreamSource(stream);
+      var analyser = audioContext.createAnalyser();
+      analyser.fftSize = 512;
+      var gain = audioContext.createGain();
+      var panner = audioContext.createStereoPanner();
+      gain.gain.value = (voice._volumePct.has(playerId) ? voice._volumePct.get(playerId) : 100) / 100;
+      panner.pan.value = (voice._panPct.get(playerId) || 0) / 100;
+      source.connect(analyser);
+      source.connect(gain);
+      gain.connect(panner);
+      panner.connect(voice.outputNode);
+      voice._speakers.set(playerId, { track: transceiver.receiver.track, element: element, source: source, analyser: analyser, gain: gain, panner: panner, isSpeaking: false, quietSinceMs: 0 });
+      voice._recordInto(gain);
+    });
+    Array.from(this._speakers.keys()).forEach(function (playerId) { if (!heard.has(playerId)) voice._unwire(playerId); });
+    var speakerPlayerIds = Array.from(heard).sort();
+    if (speakerPlayerIds.join(",") !== this.speakerPlayerIds.join(",")) {
+      this.speakerPlayerIds = speakerPlayerIds;
+      this._room._emit("voiceSpeakers", { playerIds: speakerPlayerIds.slice() });
+    }
+    this._watchLevels();
+  };
+
+  RoomVoice.prototype._unwire = function (playerId) {
+    var speaker = this._speakers.get(playerId);
+    if (!speaker) return;
+    this._speakers.delete(playerId);
+    try { speaker.source.disconnect(); speaker.gain.disconnect(); speaker.panner.disconnect(); } catch (error) { /* already gone */ }
+    speaker.element.srcObject = null;
+    if (speaker.isSpeaking) this._room._emit("speaking", { playerId: playerId, isSpeaking: false });
+  };
+
+  /** Who's speaking, from each voice's level here, ten times a second: "speaking" events, the player's own included. */
+  RoomVoice.prototype._watchLevels = function () {
+    var voice = this;
+    if (this._levelTimer) return;
+    var samples = new Float32Array(512);
+    var levelOf = function (analyser) {
+      analyser.getFloatTimeDomainData(samples);
+      var squaredSampleSumNumber = 0;
+      for (var index = 0; index < samples.length; index++) squaredSampleSumNumber += samples[index] * samples[index];
+      // Loudness 0 to 100 from the RMS level, about -60 dB to 0 dB.
+      var decibelLevel = 20 * Math.log10(Math.sqrt(squaredSampleSumNumber / samples.length) || 1e-6);
+      return Math.max(0, Math.min(100, Math.round(((decibelLevel + 60) / 60) * 100)));
+    };
+    var step = function (playerId, speaker, levelPct, nowMs) {
+      var isLoud = levelPct >= VOICE_SPEAKING_LEVEL_PCT;
+      if (isLoud) speaker.quietSinceMs = 0;
+      else if (!speaker.quietSinceMs) speaker.quietSinceMs = nowMs;
+      var isSpeaking = isLoud || (speaker.isSpeaking && nowMs - speaker.quietSinceMs < VOICE_SPEAKING_HOLD_MS);
+      if (isSpeaking === speaker.isSpeaking) return false;
+      speaker.isSpeaking = isSpeaking;
+      voice._room._emit("speaking", { playerId: playerId, isSpeaking: isSpeaking });
+      return true;
+    };
+    this._levelTimer = setInterval(function () {
+      var nowMs = Date.now();
+      voice._speakers.forEach(function (speaker, playerId) { step(playerId, speaker, levelOf(speaker.analyser), nowMs); });
+      var own = voice._ownSpeaker;
+      if (own && voice._room.me) {
+        var levelPct = voice._isMicrophoneMuted ? 0 : levelOf(own.analyser);
+        var isChanged = step(voice._room.me.id, own, levelPct, nowMs);
+        // The room hears this player's level when they start and stop, and every second while speaking: only which voices fill a full listener's slots.
+        if (isChanged || (own.isSpeaking && nowMs - voice._ownLevel.sentAtMs >= VOICE_LEVEL_REPORT_INTERVAL_MS)) {
+          voice._ownLevel = { isSpeaking: own.isSpeaking, levelPct: levelPct, sentAtMs: nowMs };
+          voice._sendVoice({ action: "level", isSpeaking: own.isSpeaking, levelPct: levelPct });
+        }
+      }
+    }, 100);
+  };
+
+  RoomVoice.prototype._watchOwnLevel = function (microphone) {
+    var analyser = this.audioContext.createAnalyser();
+    analyser.fftSize = 512;
+    this.audioContext.createMediaStreamSource(microphone).connect(analyser);
+    this._ownSpeaker = { analyser: analyser, isSpeaking: false, quietSinceMs: 0 };
+    this._watchLevels();
+  };
+
+  /** The last 30 seconds this player heard, in memory only: a recorder over every voice's mix, its pieces overwritten as it goes. */
+  RoomVoice.prototype._recordInto = function (node) {
+    if (typeof MediaRecorder !== "function") return;
+    if (!this._clip) {
+      var mix = this.audioContext.createMediaStreamDestination();
+      var clip = { mix: mix, header: null, pieces: [], recorder: null };
+      try {
+        clip.recorder = new MediaRecorder(mix.stream, { mimeType: "audio/webm;codecs=opus", audioBitsPerSecond: VOICE_BITRATE_BITS_PER_SEC });
+      } catch (error) {
+        return;
+      }
+      clip.recorder.ondataavailable = function (event) {
+        if (!event.data || !event.data.size) return;
+        // The first piece carries the file's header: kept, so the clip plays from any later piece.
+        if (!clip.header) clip.header = event.data;
+        else {
+          clip.pieces.push(event.data);
+          if (clip.pieces.length > VOICE_REPORT_AUDIO_DURATION_SEC) clip.pieces.shift();
+        }
+      };
+      clip.recorder.start(1000);
+      this._clip = clip;
+    }
+    node.connect(this._clip.mix);
+  };
+
+  /** The clip for a report, or null when voice was never heard. */
+  RoomVoice.prototype._reportClip = function () {
+    if (!this._clip || !this._clip.header) return null;
+    var clip = new Blob([this._clip.header].concat(this._clip.pieces), { type: "audio/webm" });
+    return clip.size <= VOICE_MAXIMUM_REPORT_AUDIO_SIZE_BYTES ? clip : null;
+  };
+
+  RoomVoice.prototype.setMicrophoneMuted = function (isMuted) {
+    this._isMicrophoneMuted = Boolean(isMuted);
+    if (this._microphone) this._microphone.getAudioTracks().forEach(function (track) { track.enabled = !isMuted; });
+  };
+  RoomVoice.prototype.setSpeakerVolume = function (playerId, volumePct) {
+    if (typeof playerId !== "string" || typeof volumePct !== "number" || !(volumePct >= 0 && volumePct <= 100)) throw codedError("bad_voice_call", "room.voice.setSpeakerVolume takes a player ID and a volume from 0 to 100.");
+    var wasSilent = this._volumePct.get(playerId) === 0;
+    this._volumePct.set(playerId, volumePct);
+    var speaker = this._speakers.get(playerId);
+    if (speaker) speaker.gain.gain.value = volumePct / 100;
+    // A voice turned all the way down isn't sent at all: nobody pays for what nobody hears.
+    if ((volumePct === 0) !== wasSilent) this._sendVoice({ action: "mute", playerId: playerId, isMuted: volumePct === 0 || this._room.isMuted(playerId) });
+  };
+  RoomVoice.prototype.setSpeakerPan = function (playerId, panPct) {
+    if (typeof playerId !== "string" || typeof panPct !== "number" || !(panPct >= -100 && panPct <= 100)) throw codedError("bad_voice_call", "room.voice.setSpeakerPan takes a player ID and a position from -100 (left) to 100 (right).");
+    this._panPct.set(playerId, panPct);
+    var speaker = this._speakers.get(playerId);
+    if (speaker) speaker.panner.pan.value = panPct / 100;
+  };
+  /** Sound blocked until the player taps (a browser that blocks autoplay): woken on join, and again on any later tap or key. */
+  RoomVoice.prototype._wakeSound = function () {
+    if (this.audioContext && this.audioContext.state === "suspended") this.audioContext.resume().catch(function () {});
+    if (this._outputElement && this._outputElement.paused) this._outputElement.play().catch(function () {});
+  };
+  RoomVoice.prototype._unlockSoundOnTap = function () {
+    var voice = this;
+    var wake = function () { if (voice.isJoined || voice._joinWaiter) voice._wakeSound(); };
+    ["pointerdown", "keydown", "touchend"].forEach(function (name) { document.addEventListener(name, wake, true); });
+    this._wakeOnTap = wake;
+  };
+  /** The room is left: its taps unheard and its sound let go, so a game that makes a room per match doesn't pile them up. */
+  RoomVoice.prototype._dispose = function () {
+    var wake = this._wakeOnTap;
+    if (wake) ["pointerdown", "keydown", "touchend"].forEach(function (name) { document.removeEventListener(name, wake, true); });
+    this._wakeOnTap = null;
+    if (this._outputElement) this._outputElement.srcObject = null;
+    this._outputElement = null;
+    this.outputNode = null;
+    if (this._clip && this._clip.recorder && this._clip.recorder.state !== "inactive") this._clip.recorder.stop();
+    if (this.audioContext) this.audioContext.close().catch(function () {});
+    this.audioContext = null;
+  };
+  /** A voice's sound after its volume, for the game's own effects: disconnect it and route it through your own nodes to outputNode. Null when not heard. */
+  RoomVoice.prototype.audioNodeOf = function (playerId) {
+    var speaker = this._speakers.get(playerId);
+    return speaker ? speaker.gain : null;
+  };
+  /** Players this one muted or blocked, or whose game said so: their voices aren't sent (room "muted"). */
+  RoomVoice.prototype._mutedChanged = function (mutedPlayerIds) {
+    var voice = this;
+    if (!this._pc) return;
+    var muted = new Set(mutedPlayerIds);
+    var told = this._toldMuted || new Set();
+    muted.forEach(function (playerId) { if (!told.has(playerId)) voice._sendVoice({ action: "mute", playerId: playerId, isMuted: true }); });
+    told.forEach(function (playerId) { if (!muted.has(playerId) && voice._volumePct.get(playerId) !== 0) voice._sendVoice({ action: "mute", playerId: playerId, isMuted: false }); });
+    this._toldMuted = muted;
+  };
+
+  RoomVoice.prototype.leave = function () {
+    this._wantsJoin = false;
+    this._joinAttemptNumber++;
+    if (this._pc || this._channel) this._sendVoice({ action: "leave" });
+    var waiter = this._joinWaiter;
+    this._joinWaiter = null;
+    this._close();
+    if (waiter) waiter.reject(codedError("voice_unavailable", "Left voice before it started."));
+  };
+  /** A fresh session: after a reconnect, or when a long one grew too big. */
+  RoomVoice.prototype._rejoin = function () {
+    if (!this._wantsJoin) return;
+    var isMuted = this._isMicrophoneMuted;
+    var ticket = this._ticket;
+    // A join still on its way settles with the fresh one.
+    var waiter = this._joinWaiter;
+    this._joinWaiter = null;
+    this._close();
+    var voice = this;
+    this.join(ticket ? { isMuted: isMuted, ticket: ticket } : { isMuted: isMuted }).then(function () { if (waiter) waiter.resolve(); }, function (error) {
+      if (waiter) waiter.reject(error);
+      else if (voice._wantsJoin) voice._room._emit("error", { code: error.code, message: error.message });
+    });
+  };
+  RoomVoice.prototype._close = function () {
+    var voice = this;
+    // A microphone the browser grants after this is let go at once (join's isCurrent).
+    this._joinAttemptNumber++;
+    Array.from(this._speakers.keys()).forEach(function (playerId) { voice._unwire(playerId); });
+    if (this._ownSpeaker && this._ownSpeaker.isSpeaking && this._room.me) this._room._emit("speaking", { playerId: this._room.me.id, isSpeaking: false });
+    this._ownSpeaker = null;
+    if (this._levelTimer) clearInterval(this._levelTimer);
+    this._levelTimer = null;
+    if (this._pc) this._pc.close();
+    this._pc = null;
+    if (this._microphone) this._microphone.getTracks().forEach(function (track) { track.stop(); });
+    this._microphone = null;
+    this._toldMuted = null;
+    if (this._passTimer) clearInterval(this._passTimer);
+    this._passTimer = null;
+    if (this._channel) {
+      var channel = this._channel;
+      this._channel = null;
+      try { channel.close(1000, "Left"); } catch (error) { /* already closed */ }
+    }
+    this.isJoined = false;
+    if (this.speakerPlayerIds.length) {
+      this.speakerPlayerIds = [];
+      this._room._emit("voiceSpeakers", { playerIds: [] });
+    }
+  };
+  RoomVoice.prototype._sendVoice = function (fields) {
+    var socket = this._channel || this._room._ws;
+    if (socket && socket.readyState === 1) socket.send(JSON.stringify(Object.assign({ type: "voice" }, fields)));
+  };
+
   Room.prototype.leave = function () {
+    this.voice.leave();
+    this.voice._dispose();
     if (!this._done) left(this);
     this._done = true;
     this._queue = [];
@@ -2890,6 +3391,12 @@
 
   // Zaisma's report sheet asks for a player's last chat lines on this screen, for the player to tick the ones to send.
   window.addEventListener("message", function (event) {
+    if (config.site && event.origin === config.site && event.source === window.parent && event.data && event.data.type === "zaisma:voice-clip-request") {
+      // Zaisma's report sheet asks for the last 30 seconds of voice this player heard in the room, to send with the report.
+      var heardIn = joined.filter(function (room) { return room.roomCode === event.data.code; })[0];
+      window.parent.postMessage({ type: "zaisma:voice-clip", id: event.data.id, clip: heardIn ? heardIn.voice._reportClip() : null }, config.site);
+      return;
+    }
     if (!config.site || event.origin !== config.site || event.source !== window.parent || !event.data || event.data.type !== "zaisma:chat-lines-request") return;
     var playerId = event.data.playerId, lines = [];
     joined.forEach(function (room) {

@@ -65,6 +65,18 @@ export const CHAT_ROOM_LIMITS = {
   chatWindowDurationMs: 10_000,
 } as const;
 
+/** Voice in rooms (room.voice in the game; room.setVoiceGroup, setHeardSpeakers and setHeardSpeakerCount on the server). */
+export const VOICE_ROOM_LIMITS = {
+  /** Voices each player hears at once unless the server sets it; past it, the loudest. */
+  defaultHeardSpeakerCount: 16,
+  /** The most a server can set: a phone's browser plays this many voices at once without trouble. */
+  maximumHeardSpeakerCount: 32,
+  /** A voice group's name: a team, a squad, a radio channel. */
+  maximumVoiceGroupNameCharacterCount: 40,
+  /** How long a voice ticket from your own server lasts (voiceTicket). */
+  voiceTicketDurationSec: 300,
+} as const;
+
 export const CHAT_CHECK_LIMITS = {
   /** The longest message checked, in characters: the whole text is checked, and a longer one is refused (too_long), never cut. */
   maximumMessageCharacterCount: 2000,

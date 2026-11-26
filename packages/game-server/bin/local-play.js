@@ -129,7 +129,7 @@ export function localGameHeaders(contentType, benchOrigin, connectOrigins) {
       "object-src 'none'",
       `frame-ancestors ${benchOrigin}`,
     ].join("; "),
-    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), hid=(), display-capture=(), fullscreen=(self), gamepad=(self), autoplay=(self)",
+    "Permissions-Policy": "camera=(), microphone=(self), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), hid=(), display-capture=(), fullscreen=(self), gamepad=(self), autoplay=(self)",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "Cross-Origin-Opener-Policy": "same-origin",
@@ -379,7 +379,7 @@ export async function startLocalPlay(givenOptions) {
     const claims = account
       ? {
           sub: account.playerId, aud: gameSlug, iss: issuerUrl, pass_version_number: PASS_VERSION_NUMBER, kind: "account",
-          who_can_chat: chat.whoReadsMyChat === "friends" ? "friends" : "anyone", who_reads_my_chat: chat.whoReadsMyChat, chat_reading_enabled: true,
+          who_can_chat: chat.whoReadsMyChat === "friends" ? "friends" : "anyone", who_reads_my_chat: chat.whoReadsMyChat, chat_reading_enabled: true, who_hears_my_voice: chat.whoReadsMyChat, voice_hearing_enabled: true,
           chat_group_id: `chat_group_${createHash("sha256").update(`local:${gameSlug}:${chat.bandGroup}`).digest("hex").slice(0, 24)}`,
           player_tag_id: account.playerTagId, friend_player_tag_ids: tagsOf(friendIdsOf(account.id)), block_player_tag_ids: tagsOf(blockIdsOf(account.id)),
           owned_item_names: ownedNamesOf(account.id), iat: nowSec, exp: nowSec + PASS_DURATION_SEC,

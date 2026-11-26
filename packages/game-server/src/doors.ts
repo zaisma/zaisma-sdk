@@ -61,6 +61,7 @@ export type DoorTrust =
   | "github_signature"
   | "game_origin"
   | "purchase_receipt"
+  | "voice_ticket"
   | "passkey"
   | "email_code";
 

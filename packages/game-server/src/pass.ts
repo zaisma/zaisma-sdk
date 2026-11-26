@@ -36,6 +36,13 @@ export interface PassClaims {
   /** Whether this account reads others' chat at all: false when the player turned it off. Guests' passes have none. */
   chat_reading_enabled?: boolean;
   /**
+   * Who hears this account talk, in games with voice: the same choices and the same narrowing as who_reads_my_chat
+   * (nobody while its chat is stopped). A pass without it is heard as far as it's read (canVoiceChat). Guests' passes have none.
+   */
+  who_hears_my_voice?: WhoReadsMyChat | "nobody" | (string & {});
+  /** Whether this account hears others talk at all: false when the player turned it off. Guests' passes have none. */
+  voice_hearing_enabled?: boolean;
+  /**
    * The player's network, sealed for Zaisma alone with a fresh nonce on every pass: it says nothing to your
    * server, and two seals of one network look nothing alike. Zaisma's chat check opens it for the witness rule
    * (anyone under 18 types only where two independent players read it). Pass it on as it is, in the pass.
@@ -173,6 +180,23 @@ export function canChat(first: PassClaims, second: PassClaims): boolean {
   if (typeof first.chat_group_id !== "string" || typeof second.chat_group_id !== "string") return false;
   const other = { isSameChatGroup: first.chat_group_id === second.chat_group_id, isFriend: passesAreFriends(first, second) };
   return isWithinChatReach(chatReachOf(first).sending, other) && isWithinChatReach(chatReachOf(second).reading, other);
+}
+
+/**
+ * Whether the first player's voice may reach the second: first is the speaker, second the listener, and the order
+ * matters. canChat's rule over the voice choices: both accounts, no block between them, the listener hears voice, and
+ * the speaker's who_hears_my_voice takes the listener in (everyone; the same chat group; or a friend in it). A pass
+ * from before voice is heard as far as it's read. Zaisma's rooms apply it, and the witness rule on top (anyone under
+ * 18 is heard only where two independent players hear them too); use it on any voice your own server passes on.
+ */
+export function canVoiceChat(first: PassClaims, second: PassClaims): boolean {
+  mustBePasses(first, second, "canVoiceChat");
+  const voiceSide = (claims: PassClaims): PassClaims => ({
+    ...claims,
+    who_reads_my_chat: claims.who_hears_my_voice ?? claims.who_reads_my_chat,
+    chat_reading_enabled: claims.voice_hearing_enabled ?? claims.chat_reading_enabled,
+  });
+  return canChat(voiceSide(first), voiceSide(second));
 }
 
 export type PublicKey = JsonWebKey & { kid: string };

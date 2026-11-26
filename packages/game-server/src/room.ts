@@ -7,7 +7,7 @@
  * running one copy of the game server. Names follow docs/NAMING.md.
  */
 
-import { CHAT_CHECK_LIMITS, CHAT_ROOM_LIMITS } from "./chat.ts";
+import { CHAT_CHECK_LIMITS, CHAT_ROOM_LIMITS, VOICE_ROOM_LIMITS } from "./chat.ts";
 import { DatabaseError, type GameDatabase } from "./database.ts";
 import { answersJson, checkDoor, fieldsOf, gameData, listOf, orNothing, realNumber, schemaProblems, text as textUpTo, yesOrNo, type DoorBody, type DoorCaller, type DoorContract, type DoorShape } from "./doors.ts";
 import { isRoomCode, roomCode } from "./names.ts";
@@ -155,6 +155,20 @@ export interface Room {
    * of the match, and out of any room it reserves after. onLeave runs once the current handler is done.
    */
   kick(playerId: string, kickOptions?: KickOptions): void;
+  /**
+   * Put a player in a voice group, like a team or a squad's radio, or null for none: a player in a group hears and is
+   * heard only within it, and one in none hears and is heard by everyone voice allows. Names are 1 to 40 characters.
+   * It's the server's word on fairness: a changed game can't hear the other team. (Voice: room.voice in the game.)
+   */
+  setVoiceGroup(playerId: string, groupName: string | null): void;
+  /**
+   * Whom a player hears, for proximity voice or radios: only these speakers among those voice allows, or null for
+   * all of them. Smooth fading by distance is the game's own (room.voice.setSpeakerVolume); this is the server's
+   * backstop, so a changed game can't hear what's too far away.
+   */
+  setHeardSpeakers(listenerPlayerId: string, speakerPlayerIds: readonly string[] | null): void;
+  /** How many voices each player hears at once, 1 to 32 (16 unless you set it); past it, the loudest. */
+  setHeardSpeakerCount(heardSpeakerCount: number): void;
   /**
    * Send some of this room's players to another room of this game that already exists, like back to
    * their party's match or into the next area of an open world. The other room's canJoin decides with
@@ -1048,7 +1062,7 @@ export class GameServerError extends Error {
 }
 
 /** The checks every room call goes through, here and in a game's sandbox (room-calls.ts). */
-const checks = roomCallChecks(GameServerError, { ...ROOM_LIMITS, ...ROOM_MESSAGE_LIMITS });
+const checks = roomCallChecks(GameServerError, { ...ROOM_LIMITS, ...ROOM_MESSAGE_LIMITS, ...VOICE_ROOM_LIMITS });
 
 /** The error for an option a game server doesn't take, naming the ones it does. */
 export function unknownOptionError(field: string): GameServerError {
@@ -1224,6 +1238,8 @@ export type ServerMessage =
       probeIntervalSec: number | null;
       protocolVersionNumber: number;
       canChat: boolean;
+      /** Whether this player can talk in voice (room.voice): an account whose voice reaches someone. Absent from an older runner: as canChat. */
+      canTalk?: boolean;
       /** The room takes { type: "messages", data: [...] }: the SDK combines what a game sends at once only where this says so. */
       canCombineMessages: boolean;
     }
@@ -1318,6 +1334,7 @@ export type RoomErrorCode =
   | "bad_origin"
   | "send_queue_full"
   | "chat_not_here"
+  | "voice_not_here"
   | "chat_not_allowed"
   | "chat_empty"
   | "chat_too_long"
@@ -1352,6 +1369,7 @@ export const ERROR_TEXT: Record<RoomErrorCode, string> = {
   // The SDK's own: sends waiting while it reconnects ran past its queue.
   send_queue_full: "Up to 60 sends wait while reconnecting; older ones were dropped.",
   chat_not_here: "This room's server doesn't take chat.",
+  voice_not_here: "This room's server doesn't take voice.",
   chat_not_allowed: "You can't chat here.",
   chat_empty: "Type a message first.",
   chat_too_long: "That message is too long to send.",
@@ -1385,6 +1403,10 @@ export interface SavedRoom extends RoomSettings {
   friendships?: [string, string][];
   /** Who each account player the room remembers may chat with, by player ID. */
   chatSettings?: Record<string, PlayerChatSettings>;
+  /** The game server's voice rules (room.setVoiceGroup, setHeardSpeakers, setHeardSpeakerCount), by player ID. */
+  voiceGroups?: Record<string, string>;
+  heardSpeakers?: Record<string, string[]>;
+  heardSpeakerCount?: number;
   /** When Zaisma will end the match (room.endsAt), once it's set. */
   endsAt?: string;
   /** Kept (room.setKept): it sleeps with its state when everyone leaves, instead of going a day later. */
@@ -1463,6 +1485,8 @@ export interface Transport {
   verifyReceipt?(receipt: string): Promise<ReceiptClaims>;
   /** room.applyVersionUpdate(): switch to the version coming now. Without it (your own server), it does nothing. */
   applyVersionUpdate?(): void;
+  /** Who may hear whom may have changed (room.setVoiceGroup and the like, a block, a player's chat settings): Zaisma's rooms recompute it. Without it, nothing listens. */
+  voiceRulesChanged?(): void;
   /** Whether a player's connection holds ROOM_TUNING.backedUpSizeBytes or more not yet sent. Without it, the room judges by its probes. */
   isBackedUp?(playerId: string): boolean;
   /** Where the room hands purchases over (onPurchase, onRefund). Without it, purchases never reach the room. */
@@ -1570,6 +1594,9 @@ export interface PlayerChatSettings {
   reading: ChatReach;
   chatGroupId: string | null;
   networkSeal: string | null;
+  /** Who hears the player talk, and whose voices they hear (who_hears_my_voice, voice_hearing_enabled); a pass from before voice: as far as chat. */
+  voiceSending?: ChatReach;
+  voiceHearing?: ChatReach;
 }
 
 /**
@@ -1582,14 +1609,15 @@ export const OUTSIDE_ZAISMA_CHAT_SETTINGS: PlayerChatSettings = { sending: "ever
 /** A checked pass's chat settings, for RoomCore.setChatSettings: null for a guest. A choice this version doesn't know reaches nobody. */
 export function chatSettingsOf(claims: PassClaims): PlayerChatSettings | null {
   if (claims.kind !== "account") return null;
-  return { ...chatReachOf(claims), chatGroupId: typeof claims.chat_group_id === "string" ? claims.chat_group_id : null, networkSeal: typeof claims.network_seal === "string" ? claims.network_seal : null };
+  const voice = chatReachOf({ ...claims, who_reads_my_chat: claims.who_hears_my_voice ?? claims.who_reads_my_chat, chat_reading_enabled: claims.voice_hearing_enabled ?? claims.chat_reading_enabled });
+  return { ...chatReachOf(claims), chatGroupId: typeof claims.chat_group_id === "string" ? claims.chat_group_id : null, networkSeal: typeof claims.network_seal === "string" ? claims.network_seal : null, voiceSending: voice.sending, voiceHearing: voice.reading };
 }
 
 /** Chat settings a room saved, in today's shape: one saved before who_reads_my_chat reads as v1's two-way setting did. */
 function savedChatSettings(saved: Partial<PlayerChatSettings> & { whoCanChat?: unknown }): PlayerChatSettings {
   const chatGroupId = typeof saved.chatGroupId === "string" ? saved.chatGroupId : null;
   const networkSeal = typeof saved.networkSeal === "string" ? saved.networkSeal : null;
-  if (saved.sending !== undefined && saved.reading !== undefined) return { sending: saved.sending, reading: saved.reading, chatGroupId, networkSeal };
+  if (saved.sending !== undefined && saved.reading !== undefined) return { sending: saved.sending, reading: saved.reading, chatGroupId, networkSeal, ...(saved.voiceSending && saved.voiceHearing ? { voiceSending: saved.voiceSending, voiceHearing: saved.voiceHearing } : {}) };
   const reach: ChatReach = chatGroupId === OUTSIDE_ZAISMA_CHAT_SETTINGS.chatGroupId ? "everyone" : saved.whoCanChat === "friends" ? "friends" : saved.whoCanChat === "anyone" ? "my_age_band" : "nobody";
   return { sending: reach, reading: reach, chatGroupId, networkSeal };
 }
@@ -1716,7 +1744,7 @@ const wirePlayers = { type: "array", items: looseObject } as const;
 const WIRE_DATA = {} as const;
 export const ROOM_FRAME: Readonly<Record<string, unknown>> = {
   anyOf: [
-    frameOf("welcome", { me: looseObject, isSpectator: wireYesOrNo, players: wirePlayers, room: looseObject, spectatorCount: wireNumber, hostPlayerId: wireNullable("string"), awayChecks: looseObject, endsAt: wireNullable("string"), probeIntervalSec: wireNullable("number"), protocolVersionNumber: wireNumber, canChat: wireYesOrNo, canCombineMessages: wireYesOrNo }),
+    frameOf("welcome", { me: looseObject, isSpectator: wireYesOrNo, players: wirePlayers, room: looseObject, spectatorCount: wireNumber, hostPlayerId: wireNullable("string"), awayChecks: looseObject, endsAt: wireNullable("string"), probeIntervalSec: wireNullable("number"), protocolVersionNumber: wireNumber, canChat: wireYesOrNo, canCombineMessages: wireYesOrNo }, { canTalk: wireYesOrNo }),
     frameOf("probe", { probeNumber: wireNumber, serverTimeMs: wireNumber, pingDurationMs: wireNullable("number") }),
     frameOf("ending", { endsAt: wireText }),
     frameOf("ending_cancelled"),
@@ -1733,6 +1761,8 @@ export const ROOM_FRAME: Readonly<Record<string, unknown>> = {
     frameOf("friend_request"),
     frameOf("chat", { fromPlayerId: wireText, text: wireText, hasSwearing: wireYesOrNo, hasSlur: wireYesOrNo, sentAt: wireText }),
     frameOf("chat_sent", { chatNumber: wireNumber, sentAt: wireText }),
+    // Voice, from Zaisma's rooms (apps/rooms/src/voice.ts): joined, offer, tracks or error.
+    frameOf("voice", { action: wireText }, { answerSdp: wireNullable("string"), offerSdp: wireText, tracks: { type: "array", items: looseObject }, code: wireText }),
     frameOf("chat_stopped", { chatNumber: wireNumber, reason: wireText, message: wireText }),
     frameOf("error", { code: wireText, message: wireText }, { versionId: wireText, chatNumber: wireNumber }),
     frameOf("ended", { message: wireText, endReason: wireText }),
@@ -1748,6 +1778,8 @@ const ASKED_ROOM = fieldsOf({
   labels: gameData(4 * 1024),
 });
 const PLAYER_ID_SHAPE = textUpTo(80);
+/** A voice message's most: an offer or answer for a session pulling many voices. */
+const VOICE_MESSAGE_MAXIMUM_SIZE_BYTES = 200_000;
 const IDLE_FIELDS = { idleTimeoutSec: realNumber(0, Number.MAX_SAFE_INTEGER), idleCheckEnabled: yesOrNo };
 /** A connection's limit is a room's message bucket, which takes a token per player before any of these runs. */
 const roomMessage = (whoMayCall: "room_member" | "room_player" | "room_host", fields: Record<string, DoorShape> = {}, required: readonly string[] = []): DoorContract => ({
@@ -1817,6 +1849,12 @@ export const ROOM_MESSAGE_DOORS = {
   },
   chat: roomMessage("room_player", { chatNumber: realNumber(0, Number.MAX_SAFE_INTEGER), text: textUpTo(ROOM_LIMITS.maximumGameMessageSizeBytes), toPlayerIds: listOf(PLAYER_ID_SHAPE, 200) }, ["text"]),
   block: roomMessage("room_player", { playerId: PLAYER_ID_SHAPE }, ["playerId"]),
+  // Voice (room.voice): the host's to take before receive, like chat, in Zaisma's rooms (apps/rooms/src/voice.ts). A session's
+  // descriptions grow with each voice pulled, so its door takes more than a game's message.
+  voice: {
+    ...roomMessage("room_player", { action: textUpTo(20), offerSdp: textUpTo(VOICE_MESSAGE_MAXIMUM_SIZE_BYTES), mid: textUpTo(8), isSpeaking: yesOrNo, levelPct: realNumber(0, 100), playerId: PLAYER_ID_SHAPE, isMuted: yesOrNo, answerSdp: textUpTo(VOICE_MESSAGE_MAXIMUM_SIZE_BYTES) }, ["action"]),
+    takes: { query: {}, body: { kind: "json", fields: { type: textUpTo(40), action: textUpTo(20), offerSdp: textUpTo(VOICE_MESSAGE_MAXIMUM_SIZE_BYTES), mid: textUpTo(8), isSpeaking: yesOrNo, levelPct: realNumber(0, 100), playerId: PLAYER_ID_SHAPE, isMuted: yesOrNo, answerSdp: textUpTo(VOICE_MESSAGE_MAXIMUM_SIZE_BYTES) }, required: ["type", "action"], maximumSizeBytes: VOICE_MESSAGE_MAXIMUM_SIZE_BYTES } },
+  },
   unblock: roomMessage("room_player", { playerId: PLAYER_ID_SHAPE }, ["playerId"]),
   friend_request: roomMessage("room_player", { playerId: PLAYER_ID_SHAPE }, ["playerId"]),
   "zaisma:purchase": {
@@ -1986,6 +2024,10 @@ export class RoomCore<S = any> {
   private readonly friendships = new Set<string>();
   /** Who each account player may chat with, from their pass: never in Player, so games never see it. */
   private readonly chatSettings = new Map<string, PlayerChatSettings>();
+  /** The game server's voice rules (room.setVoiceGroup, setHeardSpeakers, setHeardSpeakerCount). */
+  private readonly voiceGroups = new Map<string, string>();
+  private readonly heardSpeakers = new Map<string, readonly string[]>();
+  private heardSpeakerCount: number = VOICE_ROOM_LIMITS.defaultHeardSpeakerCount;
   /** When each player sent their chat messages in the last CHAT_ROOM_LIMITS.chatWindowDurationMs. */
   private readonly chatSentAtMs = new Map<string, number[]>();
   /** Each player's last chat messages, for Zaisma's filter to read pieces together: in memory only. */
@@ -2124,6 +2166,9 @@ export class RoomCore<S = any> {
       for (const [blocker, blocked] of saved.sessionBlocks ?? []) this.sessionBlocks.add(blockKey(blocker, blocked));
       for (const [first, second] of saved.friendships ?? []) this.friendships.add(pairKey(first, second));
       for (const [id, settings] of Object.entries(saved.chatSettings ?? {})) this.chatSettings.set(id, savedChatSettings(settings));
+      for (const [id, groupName] of Object.entries(saved.voiceGroups ?? {})) if (typeof groupName === "string") this.voiceGroups.set(id, groupName);
+      for (const [id, speakerIds] of Object.entries(saved.heardSpeakers ?? {})) if (Array.isArray(speakerIds)) this.heardSpeakers.set(id, speakerIds.filter((speakerId) => typeof speakerId === "string"));
+      if (typeof saved.heardSpeakerCount === "number") this.heardSpeakerCount = saved.heardSpeakerCount;
     } else if (startOptions.start) {
       const start = startOptions.start;
       this.isOpen = false;
@@ -2223,6 +2268,9 @@ export class RoomCore<S = any> {
         const checked = checks.checkKick(playerId, kickOptions);
         this.kick(checked.playerId, { message: checked.message, keepOut: checked.isKeptOut });
       },
+      setVoiceGroup: (playerId, groupName) => this.setVoiceGroup(checks.checkPlayerId(playerId, "room.setVoiceGroup"), checks.checkVoiceGroupName(groupName, "room.setVoiceGroup")),
+      setHeardSpeakers: (listenerPlayerId, speakerPlayerIds) => this.setHeardSpeakers(checks.checkPlayerId(listenerPlayerId, "room.setHeardSpeakers"), checks.checkPlayerIds(speakerPlayerIds, "room.setHeardSpeakers")),
+      setHeardSpeakerCount: (heardSpeakerCount) => this.setHeardSpeakerCount(checks.checkHeardSpeakerCount(heardSpeakerCount, "room.setHeardSpeakerCount")),
       moveTo: (toRoomCode, moveOptions) => this.moveTo(toRoomCode, moveOptions),
       sendToRoom: (toRoomCode, message) => {
         const reach = this.roomReachFor("room.sendToRoom");
@@ -2301,6 +2349,9 @@ export class RoomCore<S = any> {
       ...(this.isKept ? { isKept: true } : {}),
       ...this.savedBlocks(),
       ...(this.chatSettings.size ? { chatSettings: Object.fromEntries([...this.chatSettings].filter(([id]) => this.known.has(id))) } : {}),
+      ...(this.voiceGroups.size ? { voiceGroups: Object.fromEntries([...this.voiceGroups].filter(([id]) => this.known.has(id))) } : {}),
+      ...(this.heardSpeakers.size ? { heardSpeakers: Object.fromEntries([...this.heardSpeakers].filter(([id]) => this.known.has(id)).map(([id, speakerIds]) => [id, [...speakerIds]])) } : {}),
+      ...(this.heardSpeakerCount !== VOICE_ROOM_LIMITS.defaultHeardSpeakerCount ? { heardSpeakerCount: this.heardSpeakerCount } : {}),
     };
   }
 
@@ -2342,9 +2393,10 @@ export class RoomCore<S = any> {
 
   /** A player's chat settings from their pass, before join: null for a guest, who chats with nobody. */
   setChatSettings(playerId: string, settings: PlayerChatSettings | null): void {
-    if (settings) this.chatSettings.set(playerId, { sending: settings.sending, reading: settings.reading, chatGroupId: settings.chatGroupId, networkSeal: settings.networkSeal });
+    if (settings) this.chatSettings.set(playerId, { sending: settings.sending, reading: settings.reading, chatGroupId: settings.chatGroupId, networkSeal: settings.networkSeal, ...(settings.voiceSending && settings.voiceHearing ? { voiceSending: settings.voiceSending, voiceHearing: settings.voiceHearing } : {}) });
     else if (!this.chatSettings.delete(playerId)) return;
     this.dirty = true;
+    this.transport.voiceRulesChanged?.();
   }
 
   /** Whether a player can send chat at all: an account whose chat isn't stopped, with a chat group. */
@@ -2370,6 +2422,53 @@ export class RoomCore<S = any> {
     if (!receiver || receiver.chatGroupId === null) return false;
     const other = { isSameChatGroup: sender.chatGroupId === receiver.chatGroupId, isFriend: this.areFriends(senderPlayerId, receiverPlayerId) };
     return isWithinChatReach(sender.sending, other) && isWithinChatReach(receiver.reading, other);
+  }
+
+  /**
+   * Whether one player's voice may reach another, mayChat's rule over the voice choices, speaker to listener: both in
+   * the match, no block either way, the listener hears voice, and the speaker's choice takes the listener in. The voice
+   * rules (groups, heard speakers) and Zaisma's witness rule apply on top (voicePulls).
+   */
+  mayVoice(speakerPlayerId: string, listenerPlayerId: string): boolean {
+    if (speakerPlayerId === listenerPlayerId || !this.players.has(speakerPlayerId) || !this.players.has(listenerPlayerId) || this.hasBlockBetween(speakerPlayerId, listenerPlayerId)) return false;
+    const speaker = this.chatSettings.get(speakerPlayerId);
+    const listener = this.chatSettings.get(listenerPlayerId);
+    if (!speaker || !listener || speaker.chatGroupId === null || listener.chatGroupId === null) return false;
+    const other = { isSameChatGroup: speaker.chatGroupId === listener.chatGroupId, isFriend: this.areFriends(speakerPlayerId, listenerPlayerId) };
+    return isWithinChatReach(speaker.voiceSending ?? speaker.sending, other) && isWithinChatReach(listener.voiceHearing ?? listener.reading, other);
+  }
+
+  /** Whether a player can talk at all: an account whose voice reaches someone. */
+  canTalk(playerId: string): boolean {
+    const settings = this.chatSettings.get(playerId);
+    return settings !== undefined && (settings.voiceSending ?? settings.sending) !== "nobody" && settings.chatGroupId !== null;
+  }
+
+  /** The game server's voice rules: groups, heard speakers and how many voices each player hears at once. */
+  voiceRules(): { voiceGroupOf: Map<string, string | null>; heardSpeakerIdsOf: Map<string, readonly string[] | null>; heardSpeakerCount: number } {
+    return { voiceGroupOf: new Map(this.voiceGroups), heardSpeakerIdsOf: new Map(this.heardSpeakers), heardSpeakerCount: this.heardSpeakerCount };
+  }
+
+  private setVoiceGroup(playerId: string, groupName: string | null): void {
+    if (groupName === null ? !this.voiceGroups.delete(playerId) : this.voiceGroups.get(playerId) === groupName) return;
+    if (groupName !== null) this.voiceGroups.set(playerId, groupName);
+    this.dirty = true;
+    this.transport.voiceRulesChanged?.();
+  }
+
+  private setHeardSpeakers(listenerPlayerId: string, speakerPlayerIds: readonly string[] | null): void {
+    if (speakerPlayerIds === null) {
+      if (!this.heardSpeakers.delete(listenerPlayerId)) return;
+    } else this.heardSpeakers.set(listenerPlayerId, [...new Set(speakerPlayerIds)]);
+    this.dirty = true;
+    this.transport.voiceRulesChanged?.();
+  }
+
+  private setHeardSpeakerCount(heardSpeakerCount: number): void {
+    if (this.heardSpeakerCount === heardSpeakerCount) return;
+    this.heardSpeakerCount = heardSpeakerCount;
+    this.dirty = true;
+    this.transport.voiceRulesChanged?.();
   }
 
   /** Who a player's chat may reach: the players in the match (or those of toPlayerIds in it), never spectators, kept only where they may chat. */
@@ -2501,6 +2600,7 @@ export class RoomCore<S = any> {
     this.dirty = true;
     this.listingChanged = true;
     this.pairChangeCount++;
+    this.transport.voiceRulesChanged?.();
   }
 
   /** The players in the room this one has a block with, either way. */
@@ -2531,6 +2631,7 @@ export class RoomCore<S = any> {
     this.dirty = true;
     this.listingChanged = true;
     this.tellBlocks();
+    this.transport.voiceRulesChanged?.();
     return null;
   }
 
@@ -2796,7 +2897,7 @@ export class RoomCore<S = any> {
     const probeIntervalSec = this.ticking ? ROOM_TUNING.probeIntervalSec : null;
     this.sendText(
       player.id,
-      JSON.stringify({ type: "welcome", me: shownPlayer(player), isSpectator: false, players: this.list(), room: this.settings(), spectatorCount: this.spectators.size, hostPlayerId: this.hostPlayerId, awayChecks: this.checks(player.id), endsAt: this.endsAt, probeIntervalSec, protocolVersionNumber: PROTOCOL_VERSION_NUMBER, canChat: this.canChat(player.id), canCombineMessages: true } satisfies ServerMessage),
+      JSON.stringify({ type: "welcome", me: shownPlayer(player), isSpectator: false, players: this.list(), room: this.settings(), spectatorCount: this.spectators.size, hostPlayerId: this.hostPlayerId, awayChecks: this.checks(player.id), endsAt: this.endsAt, probeIntervalSec, protocolVersionNumber: PROTOCOL_VERSION_NUMBER, canChat: this.canChat(player.id), canTalk: this.canTalk(player.id), canCombineMessages: true } satisfies ServerMessage),
     );
     // Every room gets a first ping and clock sample right away, ticking or not.
     this.probe(player.id);
@@ -2834,7 +2935,7 @@ export class RoomCore<S = any> {
     const probeIntervalSec = this.ticking ? ROOM_TUNING.probeIntervalSec : null;
     this.sendText(
       spectator.id,
-      JSON.stringify({ type: "welcome", me: shownPlayer(spectator), isSpectator: true, players: this.list(), room: this.settings(), spectatorCount: this.spectators.size, hostPlayerId: this.hostPlayerId, awayChecks: { idleTimeoutSec: null, hiddenTimeoutSec: null }, endsAt: this.endsAt, probeIntervalSec, protocolVersionNumber: PROTOCOL_VERSION_NUMBER, canChat: false, canCombineMessages: true } satisfies ServerMessage),
+      JSON.stringify({ type: "welcome", me: shownPlayer(spectator), isSpectator: true, players: this.list(), room: this.settings(), spectatorCount: this.spectators.size, hostPlayerId: this.hostPlayerId, awayChecks: { idleTimeoutSec: null, hiddenTimeoutSec: null }, endsAt: this.endsAt, probeIntervalSec, protocolVersionNumber: PROTOCOL_VERSION_NUMBER, canChat: false, canTalk: false, canCombineMessages: true } satisfies ServerMessage),
     );
     this.probe(spectator.id);
     // A new connection starts with nothing of the state: a full copy comes with the next round.
@@ -3162,6 +3263,9 @@ export class RoomCore<S = any> {
       case "chat":
         // The room's host takes chat before it gets here (readChatMessage); a host that doesn't, doesn't take chat.
         return "chat_not_here";
+      case "voice":
+        // Zaisma's rooms take voice before it gets here (readVoiceMessage); elsewhere there's no voice in the room itself.
+        return "voice_not_here";
       case "zaisma:purchase":
         this.purchaseTold(playerId, message);
         return null;

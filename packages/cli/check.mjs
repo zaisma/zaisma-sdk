@@ -47,7 +47,7 @@ export const CHECK_PROBLEM_CODES = {
   file_download: { problemKind: "broken", isFixedByUploadCommand: false, meaning: "A file download, which the game's frame doesn't allow." },
   outside_link: { problemKind: "broken", isFixedByUploadCommand: false, meaning: "A link that opens another site or a new window, which the game's frame doesn't allow." },
   outside_frame: { problemKind: "broken", isFixedByUploadCommand: false, meaning: "A frame of another site, which games can't show." },
-  blocked_feature: { problemKind: "broken", isFixedByUploadCommand: false, meaning: "Camera, microphone, screen capture, location, payments, USB, serial, Bluetooth or HID, which games on Zaisma can't use." },
+  blocked_feature: { problemKind: "broken", isFixedByUploadCommand: false, meaning: "Camera, screen capture, location, payments, USB, serial, Bluetooth or HID, which games on Zaisma can't use." },
   // Zaisma's fixed checks (fixed-checks.mjs): the scan refuses a version with any of these, the same answer every time.
   crypto_miner: { problemKind: "refused", isFixedByUploadCommand: false, meaning: "The code mines cryptocurrency." },
   disguised_code: { problemKind: "refused", isFixedByUploadCommand: false, meaning: "The code runs text it decodes (base64, character codes or bytes) as code, which hides what it runs." },
@@ -293,7 +293,8 @@ function findAddresses(text) {
 }
 
 const FEATURES = [
-  { pattern: /\bgetUserMedia\b/, name: "the camera or microphone (getUserMedia)" },
+  // The microphone is the game's to ask for (voice chat, a game played by voice: Julius, Nov 26, 2026); the camera isn't.
+  { pattern: /\bgetUserMedia\s*\(\s*\{[^}]*\bvideo\s*:\s*(?!false\b)/, name: "the camera (getUserMedia with video)" },
   { pattern: /\bgetDisplayMedia\b/, name: "screen capture (getDisplayMedia)" },
   { pattern: /\bnavigator\.geolocation\b/, name: "location (navigator.geolocation)" },
   { pattern: /\bnew\s+PaymentRequest\b/, name: "payments (PaymentRequest)" },

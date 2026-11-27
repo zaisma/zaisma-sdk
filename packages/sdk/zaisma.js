@@ -1982,13 +1982,15 @@
     this._isMicrophoneMuted = Boolean(voiceOptions && voiceOptions.isMuted);
     this._wantsJoin = true;
     // Made and woken here, inside the player's tap: made later, after the microphone's prompt, browsers keep it silent.
-    if (!this.audioContext) this.audioContext = new AudioContext();
+    // Voices are marked as such, so Zaisma's own sound (_zaisma/sound.js) plays them at the player's voice volume, apart from the game's.
+    if (!this.audioContext) { this.audioContext = new AudioContext(); this.audioContext.__zaismaVoice = true; }
     if (!this.outputNode) {
       // Voices reach the speakers through a media element, not the context's own output: echo cancellation hears what
       // media elements play (on phones, only that), so the microphone doesn't send the voices back. The game's own sound
       // can come this way too (outputNode).
       var output = this.audioContext.createMediaStreamDestination();
       this._outputElement = new Audio();
+      this._outputElement.__zaismaVoice = true;
       this._outputElement.srcObject = output.stream;
       this.outputNode = output;
       this._unlockSoundOnTap();
@@ -2104,6 +2106,7 @@
       var stream = new MediaStream([transceiver.receiver.track]);
       // Chrome plays a remote voice into Web Audio only while a media element holds it too; the element itself stays silent.
       var element = new Audio();
+      element.__zaismaVoice = true;
       element.muted = true;
       element.srcObject = stream;
       element.play().catch(function () {});
@@ -3040,7 +3043,26 @@
    */
   var pageEvents = new Emitter(PAGE_EVENTS, "Zaisma.page has");
   var coveredBy = null;
+  /*
+   * The game's two calls on Zaisma's page (zaisma.d.ts: Zaisma.page.openPlayerCard, Zaisma.page.leave). A game owns everything inside itself, so its own
+   * scoreboard's Card button and its own menu's Leave are its; Zaisma only draws the card (with Block and Report always in it) and takes the player out.
+   * Off Zaisma (the developer's own site, a local test without a page) there's no page to answer: each says so, and the game does what it does there.
+   */
+  var MAXIMUM_PLAYER_ID_CHARACTER_COUNT = 60;
+  function openPlayerCard(playerId) {
+    if (typeof playerId !== "string" || !playerId || playerId.length > MAXIMUM_PLAYER_ID_CHARACTER_COUNT) return Promise.reject(codedError("bad_player_id", "openPlayerCard takes the player's id, as room.players lists it."));
+    if (!config.site || window.parent === window) return Promise.reject(notOnZaisma("Zaisma's player card opens when the game is played on its zaisma.com page."));
+    window.parent.postMessage({ type: "zaisma:open-player-card", playerId: playerId }, config.site);
+    return Promise.resolve();
+  }
+  function leave() {
+    if (!config.site || window.parent === window) return Promise.reject(notOnZaisma("Leaving through Zaisma works when the game is played on its zaisma.com page."));
+    window.parent.postMessage({ type: "zaisma:leave" }, config.site);
+    return Promise.resolve();
+  }
   var zaismaPage = {
+    openPlayerCard: openPlayerCard,
+    leave: leave,
     on: function (event, listener) {
       pageEvents.on(event, listener);
       return zaismaPage;

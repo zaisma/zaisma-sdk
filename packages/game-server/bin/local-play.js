@@ -38,7 +38,7 @@ export const LOCAL_VERSION_ID = "version_local";
 /** The folder in the game's folder that held what the bench keeps, before it moved out (benchFolderOf): still never served, watched or uploaded, and moved out on the next start. */
 export const LOCAL_FOLDER = ".zaisma-local";
 /** Every _zaisma/ file the games Worker serves, split by whether it works here or only loads and does nothing (test/node/local-play-parity.test.ts holds this to apps/games/src/index.ts). */
-export const SERVED_ZAISMA_PATHS = ["_zaisma/v1.js", "_zaisma/v1.d.ts", "_zaisma/relay.js", "_zaisma/picture.js", "_zaisma/saves.js", "_zaisma/restore"];
+export const SERVED_ZAISMA_PATHS = ["_zaisma/v1.js", "_zaisma/v1.d.ts", "_zaisma/relay.js", "_zaisma/picture.js", "_zaisma/sound.js", "_zaisma/saves.js", "_zaisma/restore"];
 /** The _zaisma/ files only the bench serves, which Zaisma's games Worker never does: the bench's clip recorder. */
 export const ONLY_ON_BENCH_PATHS = ["_zaisma/clip.js"];
 export const ONLY_ON_ZAISMA_PATHS = ["_zaisma/performance.js", "_zaisma/pressure.js", "_zaisma/warm", "_zaisma/warm.json", "_zaisma/warm-redirects.json", "_zaisma/warm.js"];
@@ -1053,10 +1053,23 @@ export async function startLocalPlay(givenOptions) {
 
     // Friends: who's playing, the Friend marks in the players sheet, and blocks.
     if (request.method === "GET" && path === `${game}/friends`) return fragment(account ? glass.friendsHereHtml(gameSlug, friendsPlaying(account.id)) : "");
-    if (request.method === "GET" && path === `${game}/players/friends`) {
-      if (!account) return reply(401, { error: { code: "not_signed_in", message: "Sign in to see your friends." } });
-      const room = (url.searchParams.get("room") ?? "").toUpperCase();
-      return fragment(glass.friendRowsHtml(gameSlug, friendsPlaying(account.id).filter((friend) => friend.roomCode !== room)));
+    // The guide's places, from the bench's own players (glass.guidePlaceHtml); its sound and invites are kept nowhere here.
+    const guideMatch = /^\/guide\/([a-z]+)$/.exec(path);
+    if (guideMatch && request.method === "GET") {
+      const friendIds = new Set(account ? friendIdsOf(account.id) : []);
+      const markup = glass.guidePlaceHtml(guideMatch[1], url.searchParams, {
+        gameSlug,
+        account: account ? { username: account.username, playerId: account.playerId } : null,
+        friends: account ? friendsPlaying(account.id) : [],
+        others: state.accounts.map((other) => ({ username: other.username, playerId: other.playerId, isFriend: friendIds.has(other.id) })),
+      });
+      return markup === null ? reply(404, { error: { code: "not_found", message: "Nothing here." } }) : fragment(markup);
+    }
+    if (guideMatch && isPost) {
+      const body = await readJson(request);
+      if (!account) return reply(401, { error: { code: "not_signed_in", message: "Sign in first.", field: null, fix: "Sign in, then try again." } });
+      if (guideMatch[1] === "sound") return reply(200, { sound: body });
+      if (guideMatch[1] === "invite") return reply(200, { invite_status: "sent" });
     }
     if (request.method === "GET" && path === "/friends/among") {
       const given = (url.searchParams.get("player_ids") ?? "").split(",").filter(Boolean);
@@ -1334,6 +1347,7 @@ export async function startLocalPlay(givenOptions) {
         if (path === "_zaisma/clip.js") return send(200, js, clipScriptSource(benchOrigin));
         if (path === "_zaisma/relay.js") return send(200, js, withSetup("__ZAISMA_RELAY__", { rooms: originFor(request, ports.rooms), game: gameSlug, site: benchOrigin, ownRelayHosts: [], fetchEarly: false }, sdkText("relay.js")));
         if (path === "_zaisma/picture.js") return send(200, js, withSetup("__ZAISMA_PICTURE__", { site: benchOrigin }, sdkText("picture.js")));
+        if (path === "_zaisma/sound.js") return send(200, js, withSetup("__ZAISMA_SOUND__", { site: benchOrigin }, sdkText("sound.js")));
         if (path === "_zaisma/saves.js") {
           const versionId = url.searchParams.get("version_id");
           return send(200, js, withSetup("__ZAISMA_SAVES__", { site: benchOrigin, saveLimitBytes: SAVE_LIMIT_BYTES, versionId: versionId === LOCAL_VERSION_ID ? versionId : null }, sdkText("saves.js")));
@@ -1358,7 +1372,7 @@ export async function startLocalPlay(givenOptions) {
       const contentType = TYPES[extname(target).toLowerCase()] ?? "application/octet-stream";
       const bytes = readFileSync(target);
       if (contentType.startsWith("text/html")) {
-        const injected = withScripts(bytes.toString("utf8"), [`/_zaisma/saves.js?v=${SCRIPTS_VERSION_NUMBER}&version_id=${LOCAL_VERSION_ID}`, `/_zaisma/clip.js?v=${SCRIPTS_VERSION_NUMBER}`]);
+        const injected = withScripts(bytes.toString("utf8"), [`/_zaisma/sound.js?v=${SCRIPTS_VERSION_NUMBER}`, `/_zaisma/saves.js?v=${SCRIPTS_VERSION_NUMBER}&version_id=${LOCAL_VERSION_ID}`, `/_zaisma/clip.js?v=${SCRIPTS_VERSION_NUMBER}`]);
         return send(200, contentType, injected);
       }
       const range = /^bytes=(\d*)-(\d*)$/.exec(request.headers.range ?? "");

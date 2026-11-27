@@ -236,7 +236,7 @@ const server: Server;
 
 ```ts
 /**
- * Invite friends. On Zaisma it opens Zaisma's invite sheet, the same as the Zaisma overlay's Share: the
+ * Invite friends. On Zaisma it opens Zaisma's invite sheet, the same as the guide's Share: the
  * room's QR code, link and code, Copy and the share sheet ("opened", or "failed" when the page couldn't
  * open it). On your own site it opens the share sheet on phones, otherwise copies the room's invite link
  * (the game's page without a room). Call it from a button in your game, like on a "waiting for players"
@@ -346,7 +346,7 @@ const versions: Versions;
 ```ts
 /**
  * Whether Zaisma's page covers the game right now, so a game can pause or hold the player's input while it does.
- * coveredBy is "sheet" while one of Zaisma's sheets is open over the game (buying, the Zaisma overlay, Report: the player is
+ * coveredBy is "sheet" while one of Zaisma's sheets is open over the game (buying, the guide, Report: the player is
  * busy with it), "card" while one of its cards is over the game's corner (Still there?, Keep your progress; the
  * game stays in view and playable), and null otherwise. Always null outside Zaisma's page (your own site, a
  * local test). Listen for "coveredBy" to hear each change.
@@ -761,10 +761,26 @@ interface ItemForSale {
 ### Page
 
 ```ts
-/** Whether Zaisma's page covers the game ({@link page}). */
+/** Whether Zaisma's page covers the game ({@link page}), and the game's two calls on it. */
 interface Page {
   /** "sheet", "card" or null: what of Zaisma's is over the game now. Read-only. */
   readonly coveredBy: CoveredBy;
+  /**
+   * Opens Zaisma's player card for a player in the game's room, on that player's press in your game (a Card button on a scoreboard): who they are, how
+   * the player knows them, Add friend, Mute, Block and Report. Only a player in the room the game is in; the guide beside the game shows it. It opens
+   * only right after the player's own press, as Zaisma.invite does: called at any other time, nothing opens.
+   * Fails with error.code "bad_player_id" for something that isn't a player's id, and "not_on_zaisma" off Zaisma's page.
+   * @example
+   * cardButton.onclick = () => Zaisma.page.openPlayerCard(player.id);
+   */
+  openPlayerCard(playerId: string): Promise<void>;
+  /**
+   * Ends play from the game's own menu, after its own confirm: the player lands on the game's page, where the guide's Leave lands. Fails with
+   * error.code "not_on_zaisma" off Zaisma's page, where the game ends play its own way.
+   * @example
+   * quitConfirm.onclick = () => Zaisma.page.leave();
+   */
+  leave(): Promise<void>;
   /** Listen for "coveredBy": called with the new value each time it changes. A wrong name fails with error.code "unknown_event". */
   on(event: "coveredBy", listener: (coveredBy: CoveredBy) => void): Page;
   off(event: "coveredBy", listener: (coveredBy: CoveredBy) => void): Page;

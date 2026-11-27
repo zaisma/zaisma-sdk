@@ -35,7 +35,7 @@ else {
 cpSync(join(repositoryDir, "brand"), join(distDir, "bench/brand"), { recursive: true, filter: (source) => !/\.afdesign$/.test(source) });
 // play-locally serves the same SDK as Zaisma: its files go beside bin/, where bin/local-play.js looks for them.
 mkdirSync(join(distDir, "sdk"), { recursive: true });
-for (const file of ["zaisma.js", "zaisma.d.ts", "saves.js", "relay.js", "picture.js"]) copyFileSync(join(repositoryDir, "packages/sdk", file), join(distDir, "sdk", file));
+for (const file of ["zaisma.js", "zaisma.d.ts", "saves.js", "relay.js", "picture.js", "sound.js"]) copyFileSync(join(repositoryDir, "packages/sdk", file), join(distDir, "sdk", file));
 copyFileSync(join(packageDir, "README.md"), join(distDir, "README.md"));
 copyFileSync(join(repositoryDir, "LICENSE"), join(distDir, "LICENSE"));
 

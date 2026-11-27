@@ -64058,8 +64058,8 @@ function playingPeople(options) {
             { title: "Profile", href: "/", id: "players-player-profile", lead: icon("person"), isHidden: true },
             // Only when they take friend requests from this player (friend-requests.ts asks), with no hint why otherwise.
             { title: action("addFriend").label, press: {}, id: "players-player-friend", lead: icon(action("addFriend").icon), isHidden: true },
-            // Add friend, once it's sent: the row keeps its place, with nothing to press.
-            { title: "Friend request sent", id: "players-player-sent", lead: icon(action("addFriend").icon), isAway: true, isHidden: true },
+            // Add friend, once it's sent: the row keeps its place, with Take back at its end (one press, no question: it reaches nobody).
+            { title: "Request sent", id: "players-player-sent", lead: icon(action("addFriend").icon), isAway: true, isHidden: true, action: secondaryButton("Take back", { type: "button", isSmall: true, id: "players-player-take-back" }) },
             { title: "Mute", press: {}, id: "players-player-mute", lead: icon("speaker") },
             { title: "Unblock", press: {}, id: "players-player-unblock", lead: icon("ban"), isHidden: true },
             { title: "Block", press: {}, id: "players-player-block", lead: icon("ban") },
@@ -64328,7 +64328,10 @@ var PLAYERS_SHEET_SCRIPT = pageScript("players-sheet", String.raw`(() => {
   });
 
   // Add friend, Friend request sent, or Sign in to add friends: asked of Zaisma as the player's sheet opens.
+  // The player whose friend choice shows, to ask again after Take back.
+  let friendChoiceOf = null;
   function showFriendChoice(other, known, isBlocked) {
+    friendChoiceOf = { other, known, isBlocked };
     const add = $("players-player-friend"), sent = $("players-player-sent"), signIn = $("players-player-sign-in");
     add.closest("li").hidden = true;
     sent.closest("li").hidden = true;
@@ -64351,6 +64354,21 @@ var PLAYERS_SHEET_SCRIPT = pageScript("players-sheet", String.raw`(() => {
       })
       .catch(() => {});
   }
+  // Take back: the row turns back into Add friend (asked of Zaisma again), or Friend when their accept came first.
+  $("players-player-take-back").addEventListener("click", async () => {
+    const button = $("players-player-take-back");
+    if (!chosen || button.getAttribute("aria-busy") === "true") return;
+    const playerId = chosen.id;
+    const res = await window.zaismaWait(button, fetch("/friends/requests/" + playerId + "/take-back", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => null));
+    const answer = res && res.ok ? await res.json().catch(() => null) : null;
+    if (!answer) return;
+    sentTo.delete(playerId);
+    if (answer.status === "friends") return dispatchEvent(new CustomEvent("zaisma:friend-added", { detail: { id: playerId } }));
+    if (chosen && chosen.id === playerId && friendChoiceOf && friendChoiceOf.other.id === playerId) {
+      $("players-player-sent").closest("li").hidden = true;
+      showFriendChoice(friendChoiceOf.other, friendChoiceOf.known, friendChoiceOf.isBlocked);
+    }
+  });
   $("players-player-friend").addEventListener("click", () => {
     if (!chosen) return;
     // Its confirm opens on top, so closing it comes back to this player's choices.
@@ -64847,14 +64865,17 @@ var friendRequestCard = (isShown = false) => notice({
   })
 });
 var friendAcceptedCard = (isShown = false) => notice({ placement: "over-game", isShown, id: "friend-accepted-card", strip: { lead: pictureFrame("?", "xs"), words: html`You and <strong data-notice-copies="friend-accepted-name"></strong> are friends` }, body: stack({ items: [{ kind: "words", markup: html`<p>You and <strong id="friend-accepted-name"></strong> are friends now.</p>` }] }) });
+var friendRequestGoneCard = (isShown = false) => notice({ placement: "over-game", isShown, id: "friend-request-gone-card", strip: { lead: pictureFrame("?", "xs"), words: html`That request isn't waiting any more` }, body: stack({ items: [{ kind: "words", markup: html`<p>That request isn't waiting any more.</p>` }] }) });
 function friendRequestParts(options) {
   return html`${friendRequestSheet({})}
 ${friendRequestCard()}
 ${friendAcceptedCard()}
+${friendRequestGoneCard()}
 ${pageData("friend-request-data", { gameOrigin: options.gameOrigin, slug: options.slug })}
 ${scriptTags(FRIEND_REQUEST_SCRIPT)}`;
 }
 var CARD_SHOWN_MS = 8e3;
+var DAY_MS16 = 864e5;
 var NEWS_SHOWN_MS = 5e3;
 var FRIEND_REQUEST_SCRIPT = pageScript("friend-requests", String.raw`(() => {
   const sheet = document.getElementById("friend-request");
@@ -64936,6 +64957,10 @@ var FRIEND_REQUEST_SCRIPT = pageScript("friend-requests", String.raw`(() => {
   const SHOWN_KEY = "zaisma:friend-requests-shown";
   const shown = () => { try { return new Set(JSON.parse(sessionStorage.getItem(SHOWN_KEY) || "[]")); } catch { return new Set(); } };
   const keepShown = (ids) => { try { sessionStorage.setItem(SHOWN_KEY, JSON.stringify([...ids].slice(-200))); } catch {} };
+  // When a card from each sender last showed on this device: { player_id: ms }.
+  const CARDED_KEY = "zaisma:friend-request-cards";
+  const cardedAt = () => { try { const kept = JSON.parse(localStorage.getItem(CARDED_KEY) || "{}"); return kept && typeof kept === "object" ? kept : {}; } catch { return {}; } };
+  const keepCarded = (carded) => { try { const fresh = Object.entries(carded).filter(([, at]) => Date.now() - at < ${DAY_MS16}).slice(-200); localStorage.setItem(CARDED_KEY, JSON.stringify(Object.fromEntries(fresh))); } catch {} };
   let waiting = [];
   let showing = null;
   let cardTimer = null;
@@ -64979,8 +65004,12 @@ var FRIEND_REQUEST_SCRIPT = pageScript("friend-requests", String.raw`(() => {
     showNews();
     if (showing || !isPlaying()) return;
     const seen = shown();
-    const next = waiting.find((each) => !seen.has(each.player_id + ":" + each.created_at_ms));
+    // One card a day from the same sender, by when Zaisma let it come and when one last showed here: the rest wait quietly in Players and on /friends.
+    const carded = cardedAt();
+    const next = waiting.find((each) => each.can_show_card !== false && !(Date.now() - (carded[each.player_id] || 0) < ${DAY_MS16}) && !seen.has(each.player_id + ":" + each.created_at_ms));
     if (!next) return;
+    carded[next.player_id] = Date.now();
+    keepCarded(carded);
     seen.add(next.player_id + ":" + next.created_at_ms);
     keepShown(seen);
     showing = next;
@@ -65004,12 +65033,21 @@ var FRIEND_REQUEST_SCRIPT = pageScript("friend-requests", String.raw`(() => {
     waiting = waiting.filter((each) => each.player_id !== playerId);
     dispatchEvent(new CustomEvent("zaisma:friend-requests-waiting", { detail: { requests: waiting } }));
     const isAccepted = Boolean(res && res.ok) && verb === "accept";
+    // Taken back by its sender since: it just isn't waiting any more.
+    if (res && res.status === 404 && verb === "accept") sayGone();
     // Friends now: Players marks them, and the rooms they share tell the sender's game to have their page look.
     if (isAccepted) {
       dispatchEvent(new CustomEvent("zaisma:friend-added", { detail: { id: playerId } }));
       tell({ type: "zaisma:friend-request", playerId, status: "accepted" });
     }
     return Boolean(res && res.ok);
+  }
+  const goneCard = $("friend-request-gone-card");
+  let goneTimer = null;
+  function sayGone() {
+    if (!goneCard || goneTimer) return;
+    zaismaLayers.say({ cardId: "friend-request-gone-card" });
+    goneTimer = setTimeout(() => { zaismaLayers.leave(goneCard); goneTimer = null; }, ${NEWS_SHOWN_MS});
   }
   $("friend-request-accept").addEventListener("click", async () => {
     if (!showing) return;
@@ -70079,7 +70117,7 @@ async function precedentAction(env2, path, form, actor) {
 var redirect = () => new Response(null, { status: 303, headers: { Location: "/admin/precedents" } });
 
 // apps/site/src/admin-mcp.ts
-var DAY_MS16 = 864e5;
+var DAY_MS17 = 864e5;
 var read2 = { readOnlyHint: true, openWorldHint: false };
 var change = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
 var object3 = (properties, required = []) => ({ type: "object", properties, required, additionalProperties: false });
@@ -70270,7 +70308,7 @@ var ADMIN_TOOLS = [
     run: async (_, { env: env2 }) => {
       const { results } = await env2.DB.prepare(
         `${QUEUE_SELECT} WHERE reports.report_status != 'open' AND reports.closed_at_ms = reports.triaged_at_ms AND reports.closed_at_ms > ? AND reports.severity_index > 0 ORDER BY reports.closed_at_ms DESC LIMIT 100`
-      ).bind(Date.now() - 7 * DAY_MS16).all();
+      ).bind(Date.now() - 7 * DAY_MS17).all();
       return {
         period_duration_days: 7,
         reports: results.map((report) => {
@@ -71029,7 +71067,7 @@ Not: { "username": "@sam", "ban_scope": "whole_account" } (why is needed: the de
     annotations: read2,
     run: async (_, { env: env2 }) => {
       const nowMs = Date.now();
-      const played = await env2.DB.prepare("SELECT COALESCE(SUM(room_play_duration_sec), 0) AS total_sec, COALESCE(SUM(rented_network_room_play_duration_sec), 0) AS rented_sec FROM room_usage WHERE date >= ?").bind(new Date(nowMs - 30 * DAY_MS16).toISOString().slice(0, 10)).first();
+      const played = await env2.DB.prepare("SELECT COALESCE(SUM(room_play_duration_sec), 0) AS total_sec, COALESCE(SUM(rented_network_room_play_duration_sec), 0) AS rented_sec FROM room_usage WHERE date >= ?").bind(new Date(nowMs - 30 * DAY_MS17).toISOString().slice(0, 10)).first();
       const stopped = await env2.DB.prepare("SELECT COUNT(*) AS stopped_game_count FROM game_hosting_months WHERE month_start_date = ? AND rented_share_stopped_at_ms IS NOT NULL").bind(monthStartDateOf(nowMs)).first();
       const totalSec = played?.total_sec ?? 0;
       const rentedSec = played?.rented_sec ?? 0;

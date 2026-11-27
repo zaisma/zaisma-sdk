@@ -53,6 +53,7 @@ Every error the developer API and MCP answer with, as `{ "error": { code, messag
 - `bad_deleted_account_erase_enabled` (HTTP 400): deleted_account_erase_enabled isn't true or false. Fix: Give deleted_account_erase_enabled as true or false. https://zaisma.com/developers/errors/bad_deleted_account_erase_enabled
 - `bad_friend_joins_enabled` (HTTP 400): friend_joins_enabled isn't true or false. Fix: Give friend_joins_enabled as true or false. https://zaisma.com/developers/errors/bad_friend_joins_enabled
 - `bad_performance_measuring_enabled` (HTTP 400): performance_measuring_enabled isn't true or false. Fix: Give performance_measuring_enabled as true or false. https://zaisma.com/developers/errors/bad_performance_measuring_enabled
+- `bad_microphone_enabled` (HTTP 400): microphone_enabled isn't true or false. Fix: Give microphone_enabled as true or false. https://zaisma.com/developers/errors/bad_microphone_enabled
 - `bad_room_browsing` (HTTP 400): room_browsing isn't page, game or off. Fix: Give room_browsing as page, game or off. https://zaisma.com/developers/errors/bad_room_browsing
 - `bad_multiplayer_mode` (HTTP 400): multiplayer_mode isn't none, relay or own. Fix: Give multiplayer_mode as none, relay or own. https://zaisma.com/developers/errors/bad_multiplayer_mode
 - `bad_account_requirement` (HTTP 400): account_requirement isn't none, multiplayer or whole_game. Fix: Give account_requirement as none, multiplayer or whole_game. https://zaisma.com/developers/errors/bad_account_requirement

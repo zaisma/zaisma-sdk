@@ -1741,7 +1741,8 @@ interface VoiceOptions {
 interface RoomVoice {
   /**
    * Join the room's voice: asks for the microphone when the player can talk ({@link Room.canTalk}), else joins to
-   * listen. Resolves once connected; rejects with microphone_refused (the player or browser said no), voice_not_allowed
+   * listen. Resolves once connected; rejects with microphone_refused (the player or browser said no, or the game's microphone_enabled
+   * setting is off), voice_not_allowed
    * (a guest or a spectator), voice_unavailable or hosting_paused. Call it from a tap or key press: browsers play
    * sound only after one.
    */

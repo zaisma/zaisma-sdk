@@ -558,7 +558,7 @@ A room answers a refusal with `{ type: "error", code, message }`, then closes th
 | `chat_too_long` | `room.chat` over 2000 characters. |
 | `chat_too_fast` | More than 20 chat messages in 10 seconds from one player. |
 | `voice_not_here` | A voice message reached a room whose server doesn't take voice (your own server: voice goes through a ticket, see Voice). |
-| `microphone_refused` | The SDK's own: `room.voice.join` couldn't use the microphone (the player or the browser said no). |
+| `microphone_refused` | The SDK's own: `room.voice.join` couldn't use the microphone (the player or the browser said no, or the game's `microphone_enabled` is off). |
 | `voice_not_allowed` | `room.voice.join` from a guest or a spectator. |
 | `voice_unavailable` | Voice couldn't start or connect: try again. |
 | `voice_ticket_required` | `room.voice.join` in a room on your own server without a ticket from that server. |

@@ -1,0 +1,16 @@
+{
+  "statement_version_number": 1,
+  "name": "@zaisma/piece",
+  "piece_version": "1.0.0",
+  "kind": "foundation",
+  "standard": "@zaisma/piece",
+  "summary": "How a JavaScript piece opens its settings and hooks, the same way in every piece: settings read from the piece's own statement, checked, and changed while playing, and hooks the piece calls. For a browser and a game server.",
+  "license": "MIT",
+  "entry_path": "index.js",
+  "server_entry_path": "index.js",
+  "file_paths": ["index.js", "index.d.ts", "README.md", "LICENSE.txt"],
+  "server_file_paths": ["index.js", "index.d.ts"],
+  "needs": [],
+  "settings": [],
+  "hooks": []
+}

@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { createBrotliDecompress, createGunzip } from "node:zlib";
 import { CHECKED_TEXT_EXTENSIONS, GAME_FILE_EXTENSIONS, PRECOMPRESSED_EXTENSIONS, checkGameFiles, extensionOf, findOutsideReferences } from "./check.mjs";
 import { assetHeadSizes } from "./performance.mjs";
+import { PiecesError, addPiece, checkPiece, listPieces, newerPieces, removePiece, updatePiece } from "./pieces.mjs";
 import { findChrome, openChrome } from "./chrome.mjs";
 import { SHADER_CHECK_PAGE, SHADER_LIMITS, isShaderCheckPassing, shaderCheckPageExpressions, shaderDraftAnswer, shaderRenderFromPage, shaderRenderInputOf } from "./shader-check.mjs";
 
@@ -126,7 +127,7 @@ const EXIT_CODES = {
   held: { exitCode: 3, meaning: "upload: the version is held for a person at Zaisma to look at, usually within a day." },
   rejected: { exitCode: 4, meaning: "upload: the version was rejected. Its review_reason and findings say why and how to fix it." },
   still_scanning: { exitCode: 5, meaning: "upload: the version was still being scanned after 10 minutes. Check it later with zaisma versions <slug>." },
-  problems_found: { exitCode: 6, meaning: "check: something in the game won't work on Zaisma as it is, and the upload command doesn't fix it; or the shader doesn't compile, is too slow or flashes. The problems say what and how to fix it." },
+  problems_found: { exitCode: 6, meaning: "check: something in the game won't work on Zaisma as it is, and the upload command doesn't fix it; or the shader doesn't compile, is too slow or flashes; or pieces check: the piece wouldn't add or would break in a game. The problems say what and how to fix it." },
 };
 
 /** The errors only the command itself answers with; every other code is the API's (ERROR_CODES in packages/core/src/errors.ts). */
@@ -159,8 +160,27 @@ const COMMAND_ERROR_CODES = {
   unexpected_answer: "Zaisma answered without JSON, like a page from a network in between.",
   skill_not_ours: "skill: a zaisma skill this command didn't install is already in that folder, so nothing was written; field names the folder.",
   install_not_confirmed: "skill: nothing was installed, since nobody answered the question: give --yes to install without it.",
+  bad_piece_statement: "pieces: a piece's piece.json isn't one: field names what's wrong in it.",
+  piece_statement_newer: "pieces: a piece's piece.json is written for a newer command than this one: run the newest.",
+  bad_piece_source: "pieces: what was given isn't a piece's folder, its .tgz or a name on npm, or its archive can't be trusted.",
+  piece_not_found: "pieces: there's no such piece or version where it was looked for.",
+  piece_source_unreachable: "pieces: npm couldn't be reached, so nothing was changed.",
+  piece_already_added: "pieces add: the game already has this piece at another version; a piece moves to another version only with pieces update.",
+  piece_not_added: "pieces update, pieces remove: the game has no such piece.",
+  piece_version_clash: "pieces: two pieces need versions of the same thing that don't overlap, so nothing was changed; the error says both versions and the ways out.",
+  piece_need_unmet: "pieces: something a piece needs wasn't found, so nothing was changed.",
+  piece_edited: "pieces update, pieces remove: the piece's files in the game were changed by hand; --discard-edits loses the edits.",
+  piece_source_needed: "pieces update: the piece came from a folder or a .tgz, so --from must say where the new version is.",
+  piece_not_updatable: "pieces update: a template is copied once and is the game's own.",
+  piece_not_removable: "pieces remove: a template's files are the game's own.",
+  piece_still_needed: "pieces remove: another of the game's pieces needs this one, so nothing was changed.",
+  template_file_exists: "pieces add: a template would write over a file the game already has, so nothing was changed.",
+  bad_pieces_record: "pieces: the game's pieces/pieces.json can't be read.",
+  pieces_record_newer: "pieces: the game's pieces/pieces.json was written by a newer command than this one: run the newest.",
 };
 
+const GAME_FOLDER = { hasValue: true, placeholder: "<folder>", about: "The game's folder, the one with its index.html (or its source, for a game that's built); this folder if left out" };
+const DRY_RUN = { hasValue: false, about: "Say what it would do, and change nothing" };
 const BY_ME = { hasValue: false, about: "Mark it as written by you; otherwise it says your AI wrote it" };
 const TEXT = { hasValue: true, placeholder: '"…"', about: "The text, in markdown; or pipe it in" };
 const KEYS = { hasValue: true, placeholder: "'[…]'", about: 'Only these localStorage keys, as a JSON list, like \'["coins", "level"]\'' };
@@ -387,10 +407,46 @@ const COMMANDS = {
       yes: { hasValue: false, about: "Install without asking first" },
     },
   },
+  pieces: {
+    about: "A game's pieces, the shared building blocks it's made from (docs/PIECES.md): each one's name, version, kind, standard, licence, what it needs, its settings and hooks and where to import it from, and whether its files were changed by hand",
+    arguments: [],
+    flags: { folder: GAME_FOLDER },
+  },
+  "pieces add": {
+    about: "Add a piece to a game, with what it needs: a piece the game already has is left exactly as it is, and a version that doesn't fit stops with both versions named and nothing added. The piece is a folder, the .tgz that npm pack makes, or a name on npm with an optional range. Adding never runs a piece's code",
+    arguments: [{ name: "source" }],
+    flags: { folder: GAME_FOLDER, "dry-run": DRY_RUN },
+  },
+  "pieces update": {
+    about: "Move one of a game's pieces to another version: only the one you name, and only when everything else in the game accepts it",
+    arguments: [{ name: "name" }],
+    flags: {
+      folder: GAME_FOLDER,
+      version: { hasValue: true, placeholder: "<range>", about: 'The version to move to, or a range to take the newest of, like "^1.2"; the newest if left out' },
+      from: { hasValue: true, placeholder: "<source>", about: "Where the new version is, for a piece that came from a folder or a .tgz" },
+      "discard-edits": { hasValue: false, about: "Replace the piece's files even though they were changed by hand" },
+      "dry-run": DRY_RUN,
+    },
+  },
+  "pieces remove": {
+    about: "Take one piece out of a game, unless another of its pieces needs it. Nothing else is removed: what it needed and nothing needs now is named",
+    arguments: [{ name: "name" }],
+    flags: { folder: GAME_FOLDER, "discard-edits": { hasValue: false, about: "Remove the piece's files even though they were changed by hand" }, "dry-run": DRY_RUN },
+  },
+  "pieces newer": {
+    about: "Which of a game's pieces have a newer version on npm, the newest the rest of the game accepts, and what holds it back. It changes nothing: a version moves only with pieces update",
+    arguments: [],
+    flags: { folder: GAME_FOLDER },
+  },
+  "pieces check": {
+    about: "Check a piece you're making before you publish it: its piece.json, the files it lists, that every import is a listed file or a stated need, and its package.json beside it",
+    arguments: [{ name: "folder" }],
+    flags: { fix: { hasValue: false, about: "Write piece.json.js again from piece.json first, when the piece has one" } },
+  },
   help: { about: "This help; with --json, every command, flag, exit code and error code", arguments: [], flags: {} },
 };
 /** Commands with a second word, like zaisma forum post. */
-const SUBCOMMANDS = { clip: ["remove"], links: ["set", "remove"], forum: ["post", "message", "reply"], database: ["query", "batch", "export", "import", "restore", "undo-restore"], saves: ["get", "change", "replace", "reset", "copies", "copy", "restore"], secrets: ["set", "delete"], items: ["set", "remove"], "kept-rooms": ["delete", "bring-back", "erase-now", "restore", "undo-restore", "restores", "restore-all", "restore-all-status", "undo-restore-all"] };
+const SUBCOMMANDS = { pieces: ["add", "update", "remove", "newer", "check"], clip: ["remove"], links: ["set", "remove"], forum: ["post", "message", "reply"], database: ["query", "batch", "export", "import", "restore", "undo-restore"], saves: ["get", "change", "replace", "reset", "copies", "copy", "restore"], secrets: ["set", "delete"], items: ["set", "remove"], "kept-rooms": ["delete", "bring-back", "erase-now", "restore", "undo-restore", "restores", "restore-all", "restore-all-status", "undo-restore-all"] };
 /** Flags every command takes. */
 const GLOBAL_FLAGS = {
   json: { hasValue: false, about: "Print the API's answer as JSON, as-is (on failure its { error }), and nothing else" },
@@ -611,7 +667,8 @@ async function walk(root) {
   const hiddenPaths = [];
   async function visit(dir) {
     for (const entry of await readdir(dir, { withFileTypes: true })) {
-      if (JUNK.has(entry.name)) continue;
+      // A .d.ts is for editors and AIs (a piece's index.d.ts, the SDK's types): it never runs, so it's never checked or sent.
+      if (JUNK.has(entry.name) || entry.name.endsWith(".d.ts")) continue;
       const full = join(dir, entry.name);
       if (entry.name.startsWith(".")) {
         hiddenPaths.push(relative(root, full).split(sep).join("/"));
@@ -2304,6 +2361,7 @@ async function run({ command, values, flags, globalFlags, rest }) {
     return EXIT_CODES.done;
   }
   if (command === "skill") return installSkill(flags);
+  if (command === "pieces" || command.startsWith("pieces ")) return pieces(command, values, flags);
   await updateSkillCopies();
   if (command === "games") {
     const answer = await api("GET", "/games");
@@ -2462,6 +2520,93 @@ async function updateSkillCopies() {
     }
   }
   if (skillUpdates.length && !isJson) console.error(`Updated the Zaisma skill in ${skillUpdates.length} ${skillUpdates.length === 1 ? "AI tool" : "AI tools"} to ${CLI_VERSION}.`);
+}
+
+/** zaisma pieces: a game's shared building blocks (pieces.mjs). Nothing reaches Zaisma: it reads and writes the game's folder. */
+async function pieces(command, values, flags) {
+  const folder = resolve(command === "pieces check" ? values.folder : (flags.folder ?? "."));
+  if (!(await stat(folder).catch(() => null))?.isDirectory()) refuse("not_a_folder", { message: `${folder} isn't a folder.`, field: "folder", fix: command === "pieces check" ? "Give the folder of the piece you're making." : "Give the game's folder with --folder, or run it inside the folder." });
+  const isDryRun = Boolean(flags["dry-run"]);
+  const isDiscardingEdits = Boolean(flags["discard-edits"]);
+  let answer;
+  try {
+    if (command === "pieces") answer = await listPieces(folder);
+    else if (command === "pieces add") answer = await addPiece(folder, values.source, { isDryRun });
+    else if (command === "pieces update") answer = await updatePiece(folder, values.name, { versionRange: flags.version ?? "*", source: flags.from ?? null, isDiscardingEdits, isDryRun });
+    else if (command === "pieces remove") answer = await removePiece(folder, values.name, { isDiscardingEdits, isDryRun });
+    else if (command === "pieces newer") answer = await newerPieces(folder);
+    else answer = await checkPiece(folder, { isFixing: Boolean(flags.fix) });
+  } catch (error) {
+    if (error instanceof PiecesError) throw new CommandError(error.error, EXIT_CODES.failed.exitCode);
+    throw error;
+  }
+  const exit = command === "pieces check" && !answer.is_ready ? EXIT_CODES.problems_found : EXIT_CODES.done;
+  if (isJson) {
+    printAnswer(answer);
+    return exit;
+  }
+  const needLine = (need) => `${need.name} ${need.version_range}${need.kind === "piece" ? "" : ` (${need.kind})`}`;
+  const sayPiece = (shown, firstWord) => {
+    console.log(`${firstWord}${shown.name} ${shown.piece_version}  ${shown.kind}, standard ${shown.standard}, ${shown.license}${shown.is_edited ? "  [its files were changed by hand]" : ""}`);
+    console.log(`    ${shown.summary}`);
+    if (shown.needs.length) console.log(`    needs: ${shown.needs.map(needLine).join(", ")}`);
+    if (shown.import_path) console.log(`    in the game:        import ... from "${shown.import_path}"`);
+    if (shown.server_import_path) console.log(`    in zaisma-server/:  import ... from "${shown.server_import_path}"`);
+    if (shown.settings.length) console.log(`    settings: ${shown.settings.map((setting) => setting.name).join(", ")}`);
+    if (shown.hooks.length) console.log(`    hooks: ${shown.hooks.map((hook) => hook.name).join(", ")}`);
+  };
+  const sayLibrary = (shown, firstWord) => console.log(`${firstWord}${shown.name} ${shown.library_version}  library${shown.license ? `, ${shown.license}` : ""}${shown.is_edited ? "  [its files were changed by hand]" : ""}`);
+  const sayImportMap = (importMap) => {
+    if (!Object.keys(importMap.imports).length) return;
+    console.log("\nA page with no bundler needs this before its scripts, so the pieces find their libraries:");
+    console.log(`  <script type="importmap">${JSON.stringify(importMap)}</script>`);
+  };
+  const sayBrought = (brought, verb) => {
+    for (const shown of brought.added_pieces) sayPiece(shown, `${verb} `);
+    for (const shown of brought.added_libraries) sayLibrary(shown, `${verb} `);
+    if (brought.kept_names.length) console.log(`Already in the game, left exactly as they are: ${brought.kept_names.join(", ")}.`);
+    for (const need of brought.engine_needs) console.log(`${need.needed_by_name} needs the engine ${need.name} ${need.version_range}: the command can't bring or check an engine, so the game must already be on it.`);
+    // A game's first pieces bring its first standards, which is no news; a standard beside the ones it had is.
+    if (brought.new_standards.length && brought.standards.length > brought.new_standards.length) console.log(`${isDryRun ? "It would bring" : "The game now holds"} pieces built on ${brought.new_standards.join(" and ")}${brought.new_standards.length === 1 ? ", a standard" : ", standards"} it didn't have before: pieces of different standards aren't made to fit each other.`);
+  };
+  const dryRunLine = "Nothing was changed: this was a dry run.";
+  if (command === "pieces") {
+    if (!answer.pieces.length && !answer.libraries.length) console.log("This game has no pieces yet. Add one with: zaisma pieces add <a piece's folder, .tgz or npm name>");
+    for (const shown of answer.pieces) sayPiece(shown, "");
+    for (const shown of answer.libraries) sayLibrary(shown, "");
+    sayImportMap(answer.import_map);
+  } else if (command === "pieces add") {
+    if (!answer.added_pieces.length && !answer.added_libraries.length) console.log("The game already has it: nothing to do.");
+    sayBrought(answer, isDryRun ? "Would add" : "Added");
+    sayImportMap(answer.import_map);
+    console.log(isDryRun ? `\n${dryRunLine}` : "\nEach piece's index.d.ts and README say how to use it. Change a piece through its settings and hooks, never its files.");
+  } else if (command === "pieces update") {
+    const [updated, earlierVersion] = answer.updated_piece ? [answer.updated_piece.piece_version, answer.earlier_piece_version] : [answer.updated_library?.library_version, answer.earlier_library_version];
+    if (!updated) console.log(`${answer.name} is already at ${answer.earlier_piece_version ?? answer.earlier_library_version}: nothing to do.`);
+    else {
+      console.log(`${isDryRun ? "Would move" : "Moved"} ${answer.name} from ${earlierVersion} to ${updated}.`);
+      sayBrought(answer, isDryRun ? "Would add" : "Added");
+      sayImportMap(answer.import_map);
+      if (isDryRun) console.log(dryRunLine);
+    }
+  } else if (command === "pieces remove") {
+    console.log(`${isDryRun ? "Would remove" : "Removed"} ${answer.removed_name} (${answer.removed_folders.join(", ")}).`);
+    if (answer.no_longer_needed_names.length) console.log(`No piece needs these any more: ${answer.no_longer_needed_names.join(", ")}. They stay until you remove them: the game's own code may use them.`);
+    if (isDryRun) console.log(dryRunLine);
+  } else if (command === "pieces newer") {
+    const newerLine = (name, current, newest, newestAccepted, heldBackByNames) => {
+      if (newestAccepted === newest) return `${name} ${current} → ${newest}: zaisma pieces update ${name}`;
+      return `${name} ${current} → ${newest}, held back by ${heldBackByNames.join(" and ")}${newestAccepted ? `; the newest they accept is ${newestAccepted}: zaisma pieces update ${name} --version ${newestAccepted}` : ""}`;
+    };
+    for (const shown of answer.newer_pieces) console.log(newerLine(shown.name, shown.piece_version, shown.newest_piece_version, shown.newest_accepted_piece_version, shown.held_back_by_names));
+    for (const shown of answer.newer_libraries) console.log(newerLine(shown.name, shown.library_version, shown.newest_library_version, shown.newest_accepted_library_version, shown.held_back_by_names));
+    if (!answer.newer_pieces.length && !answer.newer_libraries.length) console.log("Nothing newer on npm.");
+    if (answer.unchecked_names.length) console.log(`Not on npm, so not looked up: ${answer.unchecked_names.join(", ")}.`);
+  } else {
+    for (const problem of answer.problems) console.log(`${problem.problem_kind === "refused" ? "✗" : "·"} ${problem.path ? `${problem.path}: ` : ""}${problem.message} ${problem.fix} (${problem.code})`);
+    console.log(answer.is_ready ? `${answer.name} ${answer.piece_version} is ready: add it to a game with zaisma pieces add ${values.folder}, or publish it with npm publish.` : "Fix what's marked ✗, then check again.");
+  }
+  return exit;
 }
 
 /** zaisma skill: install the skill into each AI tool found, after one question (or --yes). */

@@ -1,0 +1,76 @@
+# The only way Zaisma's pieces reach npm: from this repository's main, through npm's trusted publishing with
+# provenance, never from a laptop. Every folder in pieces/ with a piece.json is a piece, published when its
+# version is new. No token or secret is used anywhere: the only credential is the OIDC token that
+# `id-token: write` gives this job. The code was tested before it reached this repository; this job puts each
+# piece through the same check any maker runs (`zaisma pieces check`) before it publishes.
+name: Publish pieces
+
+on:
+  push:
+    branches: [main]
+    paths: ["pieces/**", ".github/workflows/publish-pieces.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-pieces
+  cancel-in-progress: false
+
+jobs:
+  list:
+    name: List the pieces
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      pieces: ${{ steps.list.outputs.pieces }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: echo "pieces=$(node -e "const fs = require('fs'); console.log(JSON.stringify(fs.readdirSync('pieces').filter((name) => fs.existsSync('pieces/' + name + '/piece.json') && fs.existsSync('pieces/' + name + '/package.json'))))")" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish ${{ matrix.piece }}
+    needs: list
+    if: needs.list.outputs.pieces != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        piece: ${{ fromJSON(needs.list.outputs.pieces) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Trusted publishing needs npm 11.5.1 or newer.
+      - run: npm install -g npm@11.6.2
+      - name: Is this version new?
+        id: version
+        working-directory: pieces/${{ matrix.piece }}
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "is_new=false" >> "$GITHUB_OUTPUT"
+            echo "$NAME $VERSION is already on npm: nothing to publish."
+          else
+            echo "is_new=true" >> "$GITHUB_OUTPUT"
+            echo "$NAME $VERSION is new: publishing."
+          fi
+      # The upload command's own dependencies, as `npx @zaisma/cli` installs them with the package.
+      - if: steps.version.outputs.is_new == 'true'
+        run: npm install --no-audit --no-fund
+      # The check any maker runs: the statement, every file it lists, every import a listed file or a stated need, and the package beside it.
+      - if: steps.version.outputs.is_new == 'true'
+        run: |
+          node packages/cli/zaisma.mjs pieces check pieces/${{ matrix.piece }}
+          cd pieces/${{ matrix.piece }} && npm pack --dry-run
+      - if: steps.version.outputs.is_new == 'true'
+        working-directory: pieces/${{ matrix.piece }}
+        run: npm publish --provenance --access public

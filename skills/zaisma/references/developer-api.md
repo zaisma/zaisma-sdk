@@ -1938,7 +1938,7 @@ A minute after a version passes the scan, Zaisma has opened it in headless Chrom
 
 ### Checking a game
 
-Before uploading, the check says everything in a game that Zaisma would refuse, or that won't work inside Zaisma's game frame, each with how to fix it. It's the same check everywhere (`packages/cli/check.mjs`): `zaisma check <folder>` on a folder, with no key and nothing sent; the MCP's `check_game` with the same files as `upload_files`; and this call. `zaisma upload` runs it first.
+Before uploading, the check says everything in a game that Zaisma would refuse, or that won't work inside Zaisma's game frame, each with how to fix it. It's the same check everywhere (`packages/cli/check.mjs`): `zaisma check <folder>` on a folder, with no key and nothing sent; the MCP's `check_game` with the same files as `upload_files`; and this call. `zaisma upload` runs it first. The command leaves type files (`.d.ts`) out of what it checks and sends, since they never run: a piece carries one as its reference ([`docs/PIECES.md`](PIECES.md)).
 
 | Call | What it does |
 | --- | --- |
@@ -2050,6 +2050,12 @@ The files a version needed before its first frame in its run in Chrome are prelo
 | `zaisma saves restore <slug> <player_id> <save_copy_id>` | Make an earlier version the save again | `POST /games/:slug/saves/:player_id/copies/:id/restore` |
 | `zaisma export <slug> [--folder <folder>]` | Save everything about the game in a folder (`./<slug>-export` unless `--folder` says), with the database also as a ready `database.sqlite` | `GET /games/:slug/export/download` |
 | `zaisma skill [--folder <folder>] [--project] [--yes]` | Install the Zaisma skill into the AI tools on this computer, or update the copies it installed (see Teaching your AI) | none, it writes files on this computer |
+| `zaisma pieces [--folder <folder>]` | The game's pieces, the shared building blocks it's made from ([`docs/PIECES.md`](PIECES.md)): each one's name, version, kind, standard, licence and needs, its settings and hooks, where to import it from, and whether its files were changed by hand | none, it reads the game's folder |
+| `zaisma pieces add <source> [--folder <folder>] [--dry-run]` | Add a piece with what it needs: a folder, the `.tgz` that `npm pack` makes, or a name on npm with an optional range. A piece the game already has is left exactly as it is; a version that doesn't fit stops with both versions named and nothing added. A piece's code is never run | none, it writes the game's folder (a name is fetched from npm) |
+| `zaisma pieces update <name> [--version <range>] [--from <source>] [--discard-edits] [--folder <folder>] [--dry-run]` | Move one of the game's pieces to another version: only the one named, and only when everything else in the game accepts it | none, it writes the game's folder |
+| `zaisma pieces remove <name> [--discard-edits] [--folder <folder>] [--dry-run]` | Take one piece out of the game, unless another of its pieces needs it; what it needed and nothing needs now is named, never removed | none, it writes the game's folder |
+| `zaisma pieces newer [--folder <folder>]` | Which of the game's pieces have a newer version on npm, the newest the rest of the game accepts, and what holds it back; it changes nothing | none, it asks npm |
+| `zaisma pieces check <folder> [--fix]` | Check a piece you're making before you publish it: its `piece.json`, the files it lists, that every import is a listed file or a stated need, and the `package.json` beside it. `--fix` writes `piece.json.js` again from `piece.json` | none, it reads the piece's folder |
 
 - **Closed, like the API.** A command takes only its own flags and arguments: anything else is refused before anything is sent, with the flags it does take. Choices (`visibility`, `--screen`, `--kind`, `--category`, `--match-update-mode`) are checked first too, with the valid list. A flag that takes a value takes it as `--flag value` or `--flag=value`. Renamed commands and flags say their new name (`zaisma show` is now `zaisma visibility`; `--notes`, `--publish` and `--at` are `--patch-notes`, `--publish-when-approved` and `--scheduled-publish-at`).
 - **`--json` on every command** prints the API's answer as-is, compact, and nothing else on stdout: the same data the MCP gets. On failure it prints the API's `{ "error": { code, message, field, fix, message_for_people, retry_after_sec, help_url } }`, or the same shape without `message_for_people` for the command's own errors (below), where `field` is the flag (`--game`) or argument (`slug`) at fault. `upload --json` prints the version's last answer (`GET /games/:slug/versions/:id`) and sends its progress to stderr; `forum --json` with no topic or search prints both tabs' answers, as `{ "yours": …, "messages": … }`. Without `--json`, the command prints lines for people, and errors go to stderr as `zaisma: <message> <fix> (<code>)`.
@@ -2075,7 +2081,7 @@ Exit codes, the same for every command:
 | 3 | `held` | upload: the version is held for a person at Zaisma to look at, usually within a day. |
 | 4 | `rejected` | upload: the version was rejected. Its review_reason and findings say why and how to fix it. |
 | 5 | `still_scanning` | upload: the version was still being scanned after 10 minutes. Check it later with zaisma versions <slug>. |
-| 6 | `problems_found` | check: something in the game won't work on Zaisma as it is, and the upload command doesn't fix it; or the shader doesn't compile, is too slow or flashes. The problems say what and how to fix it. |
+| 6 | `problems_found` | check: something in the game won't work on Zaisma as it is, and the upload command doesn't fix it; or the shader doesn't compile, is too slow or flashes; or pieces check: the piece wouldn't add or would break in a game. The problems say what and how to fix it. |
 
 Errors only the command answers with, beside the API's own codes (it also uses `unknown_field`, `missing_field`, `no_key`, `internal_error` and the `bad_<field>` codes of the choices it checks):
 
@@ -2109,3 +2115,20 @@ Errors only the command answers with, beside the API's own codes (it also uses `
 | `unexpected_answer` | Zaisma answered without JSON, like a page from a network in between. |
 | `skill_not_ours` | skill: a zaisma skill this command didn't install is already in that folder, so nothing was written; field names the folder. |
 | `install_not_confirmed` | skill: nothing was installed, since nobody answered the question: give --yes to install without it. |
+| `bad_piece_statement` | pieces: a piece's piece.json isn't one: field names what's wrong in it. |
+| `piece_statement_newer` | pieces: a piece's piece.json is written for a newer command than this one: run the newest. |
+| `bad_piece_source` | pieces: what was given isn't a piece's folder, its .tgz or a name on npm, or its archive can't be trusted. |
+| `piece_not_found` | pieces: there's no such piece or version where it was looked for. |
+| `piece_source_unreachable` | pieces: npm couldn't be reached, so nothing was changed. |
+| `piece_already_added` | pieces add: the game already has this piece at another version; a piece moves to another version only with pieces update. |
+| `piece_not_added` | pieces update, pieces remove: the game has no such piece. |
+| `piece_version_clash` | pieces: two pieces need versions of the same thing that don't overlap, so nothing was changed; the error says both versions and the ways out. |
+| `piece_need_unmet` | pieces: something a piece needs wasn't found, so nothing was changed. |
+| `piece_edited` | pieces update, pieces remove: the piece's files in the game were changed by hand; --discard-edits loses the edits. |
+| `piece_source_needed` | pieces update: the piece came from a folder or a .tgz, so --from must say where the new version is. |
+| `piece_not_updatable` | pieces update: a template is copied once and is the game's own. |
+| `piece_not_removable` | pieces remove: a template's files are the game's own. |
+| `piece_still_needed` | pieces remove: another of the game's pieces needs this one, so nothing was changed. |
+| `template_file_exists` | pieces add: a template would write over a file the game already has, so nothing was changed. |
+| `bad_pieces_record` | pieces: the game's pieces/pieces.json can't be read. |
+| `pieces_record_newer` | pieces: the game's pieces/pieces.json was written by a newer command than this one: run the newest. |

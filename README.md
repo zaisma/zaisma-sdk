@@ -9,6 +9,7 @@ Zaisma's developer tools are open source, so your game is never locked in.
 | [`packages/sdk`](packages/sdk) | The browser SDK games load with `<script src="_zaisma/v1.js"></script>`. Its reference is its types, [`zaisma.d.ts`](packages/sdk/zaisma.d.ts). | [`@zaisma/sdk`](https://www.npmjs.com/package/@zaisma/sdk) (types) |
 | [`packages/game-server`](packages/game-server) | Write a game server once; run it in Zaisma's rooms or on your own Node server. | [`@zaisma/game-server`](https://www.npmjs.com/package/@zaisma/game-server) |
 | [`packages/cli`](packages/cli) | The `zaisma` command: check, play locally on a test bench, upload and publish. | [`@zaisma/cli`](https://www.npmjs.com/package/@zaisma/cli) |
+| [`pieces`](pieces) | Shared building blocks a game is made from, and the frame every piece stands on: what a piece states, how it's added and how its settings and hooks are opened ([docs/PIECES.md](docs/PIECES.md)). Anyone publishes pieces. | `npx @zaisma/cli pieces add <name>` |
 | [`skills/zaisma`](skills/zaisma), [`plugins/zaisma`](plugins/zaisma) | The Zaisma skill and the Claude Code plugin: teach your AI the whole way from an idea to a published game. | `npx @zaisma/cli skill` |
 | [`docs`](docs) | The [developer API](docs/DEVELOPER-API.md) behind the MCP, the upload command and the dashboard; [naming](docs/NAMING.md); the [cover](docs/COVERS.md) and [background](docs/BACKGROUNDS.md) guides. | |
 

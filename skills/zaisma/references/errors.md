@@ -110,6 +110,17 @@ Every error the developer API and MCP answer with, as `{ "error": { code, messag
 - `background_not_ready` (HTTP 409): The image or shader isn't this game's, isn't approved yet, or is for the other screen. Fix: Wait until get_game shows the image or shader approved for this screen, then call set_background again. https://zaisma.com/developers/errors/background_not_ready
 - `bad_color` (HTTP 400): The color isn't #RRGGBB. Fix: Give the color as #RRGGBB, like #1A2B3C. https://zaisma.com/developers/errors/bad_color
 
+## Clips
+
+- `not_a_clip` (HTTP 415): A clip is one MP4 file, not fragmented, with one H.264 picture track. Fix: Send an MP4 with one H.264 track, like the bench's Record a clip makes, or make one with ffmpeg (libx264, -movflags +faststart). https://zaisma.com/developers/errors/not_a_clip
+- `clip_has_sound` (HTTP 400): A clip is silent, and this one has a sound track. Fix: Take the sound track out (ffmpeg's -an) and send it again. https://zaisma.com/developers/errors/clip_has_sound
+- `clip_too_long` (HTTP 400): A clip runs at most 6 seconds. Fix: Cut it to at most 6 seconds that loop well (ffmpeg's -t 6) and send it again. https://zaisma.com/developers/errors/clip_too_long
+- `clip_too_big` (HTTP 413): A clip is at most 6 MB. Fix: Save it at a lower bitrate (about 4 megabits a second) and send it again. https://zaisma.com/developers/errors/clip_too_big
+- `bad_clip_dimensions` (HTTP 400): A clip fits inside 1200 by 630 px, and is at least 600 by 315. Fix: Scale it to fit inside 1200 by 630 px (ffmpeg's scale=1200:630:force_original_aspect_ratio=decrease) and send it again. https://zaisma.com/developers/errors/bad_clip_dimensions
+- `bad_clip_still` (HTTP 400): A clip comes with its still: its first frame, a PNG, JPEG or WebP the clip's size, up to 2 MB. Fix: Send the clip's first frame as still_base64, the same size as the clip; the upload command's clip makes it for you. https://zaisma.com/developers/errors/bad_clip_still
+- `clip_refused` (HTTP 422): The clip can't be used. Fix: Send a different clip. https://zaisma.com/developers/errors/clip_refused
+- `no_clip` (HTTP 404): The game has no clip. Fix: Call get_game to see the game's clip; add_clip sends one. https://zaisma.com/developers/errors/no_clip
+
 ## Uploading versions
 
 - `bad_files` (HTTP 400): files isn't a list of files in the shape the call takes. Fix: Give files as a list of { path, content_base64 } or { path, size_bytes, sha256 }, as the call's input schema shows. https://zaisma.com/developers/errors/bad_files

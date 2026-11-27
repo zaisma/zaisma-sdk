@@ -42,6 +42,7 @@ export const LOCAL_VERSION_ID: string;
 export const LOCAL_FOLDER: string;
 export const SERVED_ZAISMA_PATHS: string[];
 export const ONLY_ON_ZAISMA_PATHS: string[];
+export const ONLY_ON_BENCH_PATHS: string[];
 export function startLocalPlay(options: LocalPlayOptions): Promise<LocalPlay>;
 export function benchFolderOf(gameFolder: string): string;
 export function serverEntryOf(gameFolder: string): string | null;

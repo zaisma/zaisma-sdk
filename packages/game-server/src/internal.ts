@@ -17,3 +17,4 @@ export * from "./chat.ts";
 export * from "./voice-ticket.ts";
 export * from "./relay.ts";
 export * from "./doors.ts";
+export { CLIP_FFMPEG_LINE, CLIP_LIMITS, checkClip, isClipSizeFitting, readMp4, type ClipProblem, type ClipProblemCode, type Mp4Facts } from "./clips.ts";

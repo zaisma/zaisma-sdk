@@ -33,7 +33,7 @@ The MCP also serves this skill and its references as resources (`zaisma://skill`
 
 **Ask the developer first** before making a game players can play private or a draft again (they lose access), and before ending a live room; those calls need `"confirm": true`. Anything that spends money (top-ups, budgets, Stripe) or deletes a game others played waits for the developer's passkey on zaisma.com: show them `confirm_url` from the `confirmation_needed` answer.
 
-**Show it well.** A listed game needs a cover and at least one gallery picture (`add_image`); the cover guide is at zaisma.com/developers/covers and the background guide at zaisma.com/developers/backgrounds. `preview_game_page` pictures every place players meet the game before anything is sent.
+**Show it well.** A listed game needs a cover and at least one gallery picture (`add_image`); the cover guide is at zaisma.com/developers/covers and the background guide at zaisma.com/developers/backgrounds. `preview_game_page` pictures every place players meet the game before anything is sent. A clip (`add_clip`, up to 6 silent seconds of the game playing) makes every shared link play in iMessage, Discord and Telegram: record it on the bench's Record a clip (or `POST /bench/api/clips`), then `zaisma clip <file.mp4> --game <slug>`.
 
 ## Pick the path by the game
 

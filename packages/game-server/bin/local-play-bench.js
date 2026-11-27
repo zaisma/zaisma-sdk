@@ -197,7 +197,7 @@ function devScript() {
       closeMenus();
       return showPanel(true);
     }
-    if (target?.closest(".bm-item")) return setTimeout(closeMenus, 0);
+    if (target?.closest(".bm-item") && !target.closest("[data-bench-clip]")) return setTimeout(closeMenus, 0);
     if (!target?.closest(".bench-menu")) closeMenus();
   });
   addEventListener("keydown", (event) => {
@@ -208,6 +208,62 @@ function devScript() {
     return;
   }
 
+  // --- Record a clip: the game's frame records it (local-play-clip.js), the bench checks and keeps it, and it plays back here before it's sent ---
+  const clipBody = document.getElementById("bench-clip-body");
+  let clipRequestId = null;
+  let lastAskedClipRequestId = null;
+  const escaped = (text) => String(text).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
+  const showClip = (markup) => {
+    clipBody.hidden = false;
+    clipBody.innerHTML = markup;
+  };
+  const base64Of = (buffer) => {
+    const bytes = new Uint8Array(buffer);
+    let text = "";
+    for (let i = 0; i < bytes.length; i += 32768) text += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+    return btoa(text);
+  };
+  const keepClip = (body) =>
+    fetch(`/bench/clips?player=${playerNumber}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+      .then((response) => response.json())
+      .then((answer) => {
+        if (answer.error) return showClip(`<span class="bp-error">${escaped(answer.error.message)}</span><span class="bp-note">${escaped(answer.error.fix)}</span>`);
+        const name = answer.clip_url.split("/").pop();
+        showClip(
+          `<video src="${escaped(answer.clip_url)}" muted loop autoplay playsinline style="width:100%;border-radius:6px"></video>` +
+            `<span class="bp-note">${(answer.duration_ms / 1000).toFixed(1)} s, ${answer.width_px} by ${answer.height_px}, ${Math.round(answer.size_bytes / 1024)} KB, <span title="${escaped(answer.clip_file)}">${escaped(name)}</span> in the bench's clips folder</span>` +
+            (answer.can_send ? `<button class="bm-item" type="button" data-bench-clip-send="${escaped(name)}"><span>Send to Zaisma</span></button>` : `<span class="bp-note">Send it with: <code>${escaped(answer.send_command)}</code></span>`),
+        );
+      })
+      .catch(() => showClip('<span class="bp-error">The bench didn\'t answer.</span>'));
+  const recordClip = (durationSec, requestId) => {
+    const game = frame.contentDocument?.getElementById("game");
+    clipRequestId = requestId || `clip_request_${Date.now()}`;
+    if (!game?.contentWindow || !game.getAttribute("src")) return keepClip({ request_id: clipRequestId, error_code: "game_not_playing", message: "The game isn't playing yet." });
+    showClip(`<span class="bp-note">Recording ${durationSec} seconds…</span>`);
+    game.contentWindow.postMessage({ kind: "zaisma-bench-record", requestId: clipRequestId, durationSec }, new URL(game.getAttribute("src"), frame.contentWindow.location.href).origin);
+  };
+  addEventListener("message", (event) => {
+    const game = frame.contentDocument?.getElementById("game");
+    if (!event.data || event.data.kind !== "zaisma-bench-clip" || event.data.requestId !== clipRequestId || event.source !== game?.contentWindow) return;
+    const given = event.data;
+    clipRequestId = null;
+    showClip('<span class="bp-note">Checking it…</span>');
+    keepClip(given.errorCode ? { request_id: given.requestId, error_code: given.errorCode, message: given.message } : { request_id: given.requestId, clip_base64: base64Of(given.clip), still_base64: base64Of(given.still) });
+  });
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const recorder = target?.closest("[data-bench-clip]");
+    if (recorder) return recordClip(Number(recorder.dataset.benchClip), null);
+    const sender = target?.closest("[data-bench-clip-send]");
+    if (!sender) return;
+    sender.disabled = true;
+    fetch("/bench/clips/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clip_file: sender.dataset.benchClipSend }) })
+      .then((response) => response.json())
+      .then((answer) => sender.replaceWith(Object.assign(document.createElement("span"), { className: answer.error ? "bp-error" : "bp-note", textContent: answer.error ? `${answer.error.message} ${answer.error.fix ?? ""}` : answer.review_message })))
+      .catch(() => (sender.disabled = false));
+  });
+
   // About once a second: the player is still here, a game file changed (reload the game), and the room they're in (Add a player joins it).
   const check = () =>
     fetch(`/bench/state?player=${playerNumber}`)
@@ -215,6 +271,11 @@ function devScript() {
       .then((answer) => {
         if (reloadNumber !== null && answer.reloadNumber !== reloadNumber) frame.contentWindow?.location.reload();
         reloadNumber = answer.reloadNumber;
+        // The developer's AI asked for a clip (POST /bench/api/clips): this tab records it.
+        if (answer.clipRequest && answer.clipRequest.requestId !== lastAskedClipRequestId) {
+          lastAskedClipRequestId = answer.clipRequest.requestId;
+          recordClip(answer.clipRequest.durationSec, answer.clipRequest.requestId);
+        }
         if (answer.roomCode !== roomCode) {
           roomCode = answer.roomCode;
           // A new tab is a new player (a link to a new tab starts with nothing of this one's), into this room.

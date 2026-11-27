@@ -24,9 +24,10 @@ import { networkInterfaces } from "node:os";
 import { basename, extname, isAbsolute, join, relative as relativePath, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
-import { BUSY_CLOSE_CODE, GameServerError, PASS_VERSION_NUMBER, RECEIPT_TOKEN_TYPE, RECEIPT_VERSION_NUMBER, generateSigningKey, guestName, jwks, loadSigningKey, roomCode, signPass, verifyPass } from "../src/internal.ts";
+import { BUSY_CLOSE_CODE, CLIP_LIMITS, checkClip, GameServerError, PASS_VERSION_NUMBER, RECEIPT_TOKEN_TYPE, RECEIPT_VERSION_NUMBER, generateSigningKey, guestName, jwks, loadSigningKey, roomCode, signPass, verifyPass } from "../src/internal.ts";
 import { qrCodeModules, qrCodeSvg } from "../src/qr-code.ts";
 import { ARRIVE_SCRIPT_SOURCE, FRAME_ALLOW, KEPT_SCRIPT_SOURCE, devScriptSource } from "./local-play-bench.js";
+import { CLIP_RECORDING, clipScriptSource } from "./local-play-clip.js";
 import { isCertificateGood, makeCertificate } from "./local-play-certificate.js";
 import { COPY_STARTED_AGAIN_EXIT_CODE } from "./like-zaisma.js";
 
@@ -38,6 +39,8 @@ export const LOCAL_VERSION_ID = "version_local";
 export const LOCAL_FOLDER = ".zaisma-local";
 /** Every _zaisma/ file the games Worker serves, split by whether it works here or only loads and does nothing (test/node/local-play-parity.test.ts holds this to apps/games/src/index.ts). */
 export const SERVED_ZAISMA_PATHS = ["_zaisma/v1.js", "_zaisma/v1.d.ts", "_zaisma/relay.js", "_zaisma/picture.js", "_zaisma/saves.js", "_zaisma/restore"];
+/** The _zaisma/ files only the bench serves, which Zaisma's games Worker never does: the bench's clip recorder. */
+export const ONLY_ON_BENCH_PATHS = ["_zaisma/clip.js"];
 export const ONLY_ON_ZAISMA_PATHS = ["_zaisma/performance.js", "_zaisma/pressure.js", "_zaisma/warm", "_zaisma/warm.json", "_zaisma/warm-redirects.json", "_zaisma/warm.js"];
 const OPTION_NAMES = ["gameFolder", "port", "isOnNetwork", "gameSlug", "benchFolder", "zaismaKey", "developerApiUrl", "log"];
 const SAVE_LIMIT_BYTES = 5 * 1024 * 1024;
@@ -424,6 +427,65 @@ export async function startLocalPlay(givenOptions) {
   const PLAYER_OPEN_MS = 70_000;
   const PLAYER_PATH = /^\/p\/([1-9][0-9]{0,3})(?=\/|$)/;
   const heardAtMs = new Map(); // player number -> when its dev page last asked
+  const clipRequests = new Map(); // player number -> the AI's recording it waits for: { requestId, durationSec, settle }
+  /**
+   * Whether a request comes from the bench's own page on this computer: its Origin is the bench's (a game's page, or another site, has its
+   * own), and it comes from this computer, so a device on the same Wi-Fi (on-network) can't write recordings or send one with the key.
+   */
+  const isBenchPage = (request) => request.headers.origin === originFor(request, ports.bench) && ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(request.socket.remoteAddress ?? "");
+  /** A recorded clip's body: JSON up to the clip's most in base64, with room. */
+  const readClipBody = async (request) => {
+    const chunks = [];
+    let sizeBytes = 0;
+    for await (const chunk of request) {
+      sizeBytes += chunk.length;
+      if (sizeBytes > CLIP_LIMITS.maximumBodySizeBytes) return {};
+      chunks.push(chunk);
+    }
+    try {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      return body && typeof body === "object" && !Array.isArray(body) ? body : {};
+    } catch {
+      return {};
+    }
+  };
+  /** Keeps a recording in the bench's folder once it passes Zaisma's checks for a clip; an error answer otherwise, with its fix. */
+  const keepClip = async (given) => {
+    const fixFor = {
+      no_canvas: "This game draws no canvas to record: record any MP4 of it (a screen recorder) and send it with zaisma clip <file.mp4> --game <slug>.",
+      recording_unsupported: "This browser has no H.264 encoder: open the bench in Chrome, Edge or Safari, or record any MP4 and send it with zaisma clip.",
+      canvas_not_readable: "Serve the pictures the game draws from its own folder (or with CORS), or record any MP4 and send it with zaisma clip.",
+      already_recording: "Wait for the recording to finish.",
+      game_not_playing: "Press Play on the bench's game page first: the game loads when Play is pressed.",
+      recording_failed: "Try again with the game playing in front; or record any MP4 and send it with zaisma clip.",
+    };
+    if (typeof given.error_code === "string") {
+      const code = Object.hasOwn(fixFor, given.error_code) ? given.error_code : "recording_failed";
+      return { error: { code, message: typeof given.message === "string" ? given.message.slice(0, 300) : "The recording failed.", fix: fixFor[code] } };
+    }
+    const clipBytes = typeof given.clip_base64 === "string" ? Buffer.from(given.clip_base64, "base64") : Buffer.alloc(0);
+    const stillBytes = typeof given.still_base64 === "string" ? Buffer.from(given.still_base64, "base64") : Buffer.alloc(0);
+    const checked = checkClip(new Uint8Array(clipBytes));
+    if ("problem" in checked) return { error: checked.problem };
+    if (stillBytes.length < 3 || stillBytes[0] !== 0xff || stillBytes[1] !== 0xd8 || stillBytes.length > CLIP_LIMITS.maximumStillSizeBytes) return { error: { code: "bad_clip_still", message: "The recording's still isn't a JPEG.", fix: "Record the clip again." } };
+    const name = `clip-${new Date(now()).toISOString().replace(/[:.]/g, "-")}`;
+    mkdirSync(join(localFolder, "clips"), { recursive: true });
+    writeFileSync(join(localFolder, "clips", `${name}.mp4`), clipBytes);
+    writeFileSync(join(localFolder, "clips", `${name}.jpg`), stillBytes);
+    const clipFile = join(localFolder, "clips", `${name}.mp4`), stillFile = join(localFolder, "clips", `${name}.jpg`);
+    log(`Recorded a ${(checked.facts.durationMs / 1000).toFixed(1)} s clip: ${clipFile}. Send it with: npx @zaisma/cli clip ${clipFile} --game ${gameSlug ?? "<slug>"}`);
+    return {
+      clip_file: clipFile,
+      still_file: stillFile,
+      clip_url: `${localhostOrigin(ports.bench)}/bench/clip-files/${name}.mp4`,
+      width_px: checked.facts.widthPx,
+      height_px: checked.facts.heightPx,
+      duration_ms: checked.facts.durationMs,
+      size_bytes: clipBytes.length,
+      can_send: Boolean(zaismaKey && gameSlug),
+      send_command: `npx @zaisma/cli clip ${clipFile} --game ${gameSlug ?? "<slug>"}`,
+    };
+  };
   const lastRoomCodes = new Map(); // player number -> the room it was last seen in, to go back to after a sign-in that left the page
   let reloadNumber = 0;
   /** Tell every dev page to reload its game, at its next ask. */
@@ -632,6 +694,19 @@ export async function startLocalPlay(givenOptions) {
       if (account) signInAs(playerNumber, account);
       const room = typeof body.room_code === "string" && /^[A-Z0-9]{6}$/.test(body.room_code) ? body.room_code : null;
       return reply(201, { ...apiOpenPlayer(playerNumber), url: `${localhostOrigin(ports.bench)}/?player=${playerNumber}${room ? `&room=${room}` : ""}` });
+    }
+    // A clip of the game as it plays now, for the developer's AI: the open tab records it (the one given, else the one last heard from).
+    if (path === "/bench/api/clips" && method === "POST") {
+      const open = openPlayerNumbers();
+      const playerNumber = Number.isInteger(body.player_number) ? body.player_number : [...open].sort((first, second) => (heardAtMs.get(second) ?? 0) - (heardAtMs.get(first) ?? 0))[0];
+      if (!playerNumber || !open.includes(playerNumber)) return fail(409, "no_open_player", "No open tab of the bench to record the game in.", "Open the bench in a browser (POST /bench/api/open-players gives a url), press Play, then ask again.");
+      const durationSec = Number.isFinite(body.duration_sec) ? Math.min(CLIP_RECORDING.maximumDurationSec, Math.max(CLIP_RECORDING.minimumDurationSec, body.duration_sec)) : CLIP_RECORDING.maximumDurationSec;
+      clipRequests.get(playerNumber)?.settle({ error: { code: "recording_replaced", message: "Another recording was asked for.", fix: "Ask once at a time." } });
+      const answer = await new Promise((settle) => {
+        const timer = setTimeout(() => settle({ error: { code: "recording_timed_out", message: "The tab didn't record a clip in time.", fix: "Keep the bench's tab in front with the game playing (a hidden tab doesn't draw), then ask again." } }), (durationSec + 60) * 1000);
+        clipRequests.set(playerNumber, { requestId: `clip_request_${randomText(10)}`, durationSec, settle: (given) => { clearTimeout(timer); clipRequests.delete(playerNumber); settle(given); } });
+      });
+      return answer.error ? fail(400, answer.error.code, answer.error.message, answer.error.fix) : reply(201, answer);
     }
     const openMatch = /^\/bench\/api\/open-players\/([1-9][0-9]{0,3})(\/pass)?$/.exec(path);
     if (openMatch) {
@@ -1114,7 +1189,8 @@ export async function startLocalPlay(givenOptions) {
       if (playerNumber) heardAtMs.set(playerNumber, now());
       const roomCode = playerNumber ? roomOfPlayerId(playerIdOf(playerNumber)) : null;
       if (roomCode) lastRoomCodes.set(playerNumber, roomCode);
-      return reply(200, { reloadNumber, roomCode, openPlayerNumbers: openPlayerNumbers() });
+      const clipRequest = clipRequests.get(playerNumber);
+      return reply(200, { reloadNumber, roomCode, openPlayerNumbers: openPlayerNumbers(), clipRequest: clipRequest ? { requestId: clipRequest.requestId, durationSec: clipRequest.durationSec } : null });
     }
     if (path === "/bench/claim" && request.method === "POST") {
       const given = await readJson(request);
@@ -1123,6 +1199,39 @@ export async function startLocalPlay(givenOptions) {
     if (path === "/bench/arrive.js") {
       response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store" });
       return response.end(ARRIVE_SCRIPT_SOURCE);
+    }
+    // A clip the bench's page recorded from the game (local-play-clip.js), or why it couldn't: checked as Zaisma checks one, then kept in the bench's folder.
+    if (path === "/bench/clips" && request.method === "POST") {
+      if (!isBenchPage(request)) return reply(403, { error: { code: "bad_origin", message: "Only the bench's own page records clips.", fix: "Press Record a clip on the bench's bar." } });
+      const given = await readClipBody(request);
+      const answer = await keepClip(given);
+      const waiting = clipRequests.get(playerNumber);
+      if (waiting && waiting.requestId === given.request_id) waiting.settle(answer);
+      return reply(answer.error ? 400 : 201, answer);
+    }
+    const clipFileMatch = /^\/bench\/clip-files\/(clip-[0-9TZ-]+\.(mp4|jpg))$/.exec(path);
+    if (clipFileMatch && request.method === "GET") {
+      const file = join(localFolder, "clips", clipFileMatch[1]);
+      if (!existsSync(file)) return reply(404, { error: { code: "no_clip_file", message: "The bench has no such clip.", fix: "Record one with Record a clip." } });
+      response.writeHead(200, { "Content-Type": clipFileMatch[2] === "mp4" ? "video/mp4" : "image/jpeg", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+      return response.end(readFileSync(file));
+    }
+    // Send to Zaisma, from the bench's bar only: the clip and its still, with the bench's key, as zaisma clip sends them.
+    if (path === "/bench/clips/send" && request.method === "POST") {
+      if (!isBenchPage(request)) return reply(403, { error: { code: "bad_origin", message: "Only the bench's own page sends clips.", fix: "Press Send to Zaisma on the bench's bar." } });
+      const given = await readJson(request);
+      const name = typeof given.clip_file === "string" && /^clip-[0-9TZ-]+\.mp4$/.test(given.clip_file) ? given.clip_file : null;
+      if (!name || !existsSync(join(localFolder, "clips", name))) return reply(404, { error: { code: "no_clip_file", message: "The bench has no such clip.", fix: "Record one with Record a clip." } });
+      if (!zaismaKey || !gameSlug) return reply(400, { error: { code: "no_key", message: "The bench has no API key or game to send it with.", fix: `Run zaisma clip ${join(localFolder, "clips", name)} --game <slug> with ZAISMA_KEY set.` } });
+      const sent = await fetch(`${developerApiUrl}/games/${gameSlug}/clip`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${zaismaKey}`, "content-type": "application/json", "x-zaisma-client": "bench" },
+        body: JSON.stringify({ clip_base64: readFileSync(join(localFolder, "clips", name)).toString("base64"), still_base64: readFileSync(join(localFolder, "clips", name.replace(/\.mp4$/, ".jpg"))).toString("base64") }),
+      }).catch(() => null);
+      const answer = sent ? await sent.json().catch(() => null) : null;
+      if (!sent || !answer) return reply(502, { error: { code: "server_unreachable", message: "Zaisma couldn't be reached.", fix: "Check the connection, then press Send to Zaisma again." } });
+      log(sent.ok ? `Clip sent to Zaisma: ${answer.review_message}` : `Zaisma refused the clip: ${answer.error?.message ?? sent.status}`);
+      return reply(sent.status, answer);
     }
     if (path === "/bench/leave" && request.method === "POST") {
       heardAtMs.delete(playerNumber);
@@ -1222,6 +1331,7 @@ export async function startLocalPlay(givenOptions) {
           return send(200, js, withSetup("__ZAISMA__", config, sdkText("zaisma.js")));
         }
         if (path === "_zaisma/v1.d.ts") return send(200, "text/plain; charset=utf-8", sdkText("zaisma.d.ts"));
+        if (path === "_zaisma/clip.js") return send(200, js, clipScriptSource(benchOrigin));
         if (path === "_zaisma/relay.js") return send(200, js, withSetup("__ZAISMA_RELAY__", { rooms: originFor(request, ports.rooms), game: gameSlug, site: benchOrigin, ownRelayHosts: [], fetchEarly: false }, sdkText("relay.js")));
         if (path === "_zaisma/picture.js") return send(200, js, withSetup("__ZAISMA_PICTURE__", { site: benchOrigin }, sdkText("picture.js")));
         if (path === "_zaisma/saves.js") {
@@ -1248,7 +1358,7 @@ export async function startLocalPlay(givenOptions) {
       const contentType = TYPES[extname(target).toLowerCase()] ?? "application/octet-stream";
       const bytes = readFileSync(target);
       if (contentType.startsWith("text/html")) {
-        const injected = withScripts(bytes.toString("utf8"), [`/_zaisma/saves.js?v=${SCRIPTS_VERSION_NUMBER}&version_id=${LOCAL_VERSION_ID}`]);
+        const injected = withScripts(bytes.toString("utf8"), [`/_zaisma/saves.js?v=${SCRIPTS_VERSION_NUMBER}&version_id=${LOCAL_VERSION_ID}`, `/_zaisma/clip.js?v=${SCRIPTS_VERSION_NUMBER}`]);
         return send(200, contentType, injected);
       }
       const range = /^bytes=(\d*)-(\d*)$/.exec(request.headers.range ?? "");

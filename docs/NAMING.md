@@ -113,6 +113,7 @@ Every ID Zaisma makes says its kind in its value: `<kind>_<random>`, the kind in
 | `game` | `game_…` |
 | `version` | `version_…` |
 | `image` | `image_…` |
+| `clip` (a game's short silent loop its shared links play) | `clip_…` |
 | `shader` | `shader_…` |
 | `tester` | `tester_…` |
 | `topic` (known issues too) | `topic_…` |
@@ -237,6 +238,7 @@ One name per concept. The API and MCP column is snake_case; the SDK and game ser
 | The Zaisma skill: the workflow and its references, for any AI, installed by the upload command | `zaisma skill` (the command); MCP resources `zaisma://skill`, `zaisma://sdk`, `zaisma://naming`, `zaisma://errors`, `zaisma://game-server`, `zaisma://developer-api`, `zaisma://multiplayer`, `zaisma://loading`, `zaisma://phones`, `zaisma://saves`; MCP prompts `make_game`, `publish_game`, `fix_problem` | |
 | How many accounts have a game in their favorites (Your games) now, never who | `favorite_count` | |
 | A cover or gallery picture | `image_id` | |
+| A game's clip: up to 6 seconds of the game, silent and looping, that its shared links unfold into where an app plays one, and its still (the clip's first frame) everywhere else | `clip` on a game: `id`, `review_status`, `review_reason`, `width_px`, `height_px`, `duration_ms`, `size_bytes`, `clip_url`, `still_url`, `created_at`; inputs `clip_base64`, `still_base64`; tools `add_clip`, `remove_clip`; the upload command's `clip`; the bench's Record a clip and `POST /bench/api/clips` (`clip_file`, `still_file`); errors `not_a_clip`, `clip_has_sound`, `clip_too_long`, `clip_too_big`, `bad_clip_dimensions`, `bad_clip_still`, `clip_refused`, `no_clip`, `no_canvas`. Inside: `game_clips`, `CLIP_LIMITS` | `CLIP_LIMITS` |
 | A game's world behind Zaisma's glass, for one screen, and what it shows | `background`: `screen`, `source` (`zaisma`, `image`, `shader`, and on phone `wide`), `image_id`, `shader_id`, `still_url`; pictures are images of `kind` `background` and `phone_background` | |
 | Which screen a background is for | `screen`: `wide` (desktops and tablets), `phone` (composed for a tall screen); errors `bad_screen`, `bad_background_source`, `background_not_ready` | |
 | A small program that paints a background live | `shader_id`; a shader's `image` pass and `buffers`, `quality_checks`, `has_quality_levels`, `flash_count`, `still_url`, `frame_urls`, each pass's `source_url`, `buffer_count`, `texture_count`, `texture_image_ids`. Its source keeps Shadertoy's names on purpose (`mainImage`, `fragColor`, `fragCoord`, `iResolution`, `iTime`, `iTimeDelta`, `iFrame`, `iChannel0` to `iChannel3`, `iChannelResolution`), the form AI already writes, so nothing is left to guess; Zaisma's own inputs follow them (`iQuality`, `iGlassPanes`, `iGlassPaneCount`) | `SHADER_LIMITS`, `ShaderManifest` |

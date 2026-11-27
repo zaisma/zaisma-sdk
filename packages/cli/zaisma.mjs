@@ -152,8 +152,8 @@ const COMMAND_ERROR_CODES = {
   unknown_shader_file: "A file in a shader's folder isn't one the command reads, or no channel in channels.json names it.",
   bad_channels_file: "A shader's channels.json isn't JSON, or isn't an object of the folder's passes, each a list of channels.",
   shader_texture_not_approved: "shader, check: a texture sent for the shader was rejected, or still waits for a person, so the shader wasn't sent.",
-  no_chrome: "check: there's no Chrome on this computer to draw the shader in, and no --game with ZAISMA_KEY to draw it on Zaisma.",
-  local_chrome_failed: "check: the Chrome on this computer couldn't draw the shader.",
+  no_chrome: "check: there's no Chrome on this computer to draw the shader in, and no --game with ZAISMA_KEY to draw it on Zaisma; clip: none to take the still from the clip, and no --still.",
+  local_chrome_failed: "check: the Chrome on this computer couldn't draw the shader; clip: it couldn't take the clip's first frame.",
   game_server_not_run: "play-locally: npx couldn't run @zaisma/game-server, which runs the game on this computer.",
   server_unreachable: "Zaisma couldn't be reached: no connection, or a wrong ZAISMA_API.",
   unexpected_answer: "Zaisma answered without JSON, like a page from a network in between.",
@@ -218,6 +218,17 @@ const COMMANDS = {
       screen: { hasValue: true, isRequired: true, choices: SCREENS, about: "wide (desktops and tablets) or phone (composed for a tall screen)" },
     },
   },
+  clip: {
+    about:
+      "Send a game's clip: up to 6 seconds of it, silent and looping, that links to the game and its rooms unfold into, playing, in iMessage, Discord and Telegram, with its first frame everywhere else. " +
+      "An MP4 (H.264, no sound) fitting inside 1200 by 630, like play-locally's Record a clip makes; its still is taken from the first frame in the Chrome on this computer unless --still gives one",
+    arguments: [{ name: "file" }],
+    flags: {
+      game: { hasValue: true, isRequired: true, placeholder: "<slug>", about: "The game it's for" },
+      still: { hasValue: true, placeholder: "<picture>", about: "The clip's first frame as a PNG, JPEG or WebP the clip's size, when there's no Chrome here to take it" },
+    },
+  },
+  "clip remove": { about: "Remove a game's clip: its links go back to the share picture or cover", arguments: [], flags: { game: { hasValue: true, isRequired: true, placeholder: "<slug>", about: "The game" } } },
   versions: { about: "List a game's versions and preview links", arguments: [{ name: "slug" }], flags: {} },
   publish: {
     about: "Publish a version that passed, or roll back to an older one",
@@ -379,7 +390,7 @@ const COMMANDS = {
   help: { about: "This help; with --json, every command, flag, exit code and error code", arguments: [], flags: {} },
 };
 /** Commands with a second word, like zaisma forum post. */
-const SUBCOMMANDS = { links: ["set", "remove"], forum: ["post", "message", "reply"], database: ["query", "batch", "export", "import", "restore", "undo-restore"], saves: ["get", "change", "replace", "reset", "copies", "copy", "restore"], secrets: ["set", "delete"], items: ["set", "remove"], "kept-rooms": ["delete", "bring-back", "erase-now", "restore", "undo-restore", "restores", "restore-all", "restore-all-status", "undo-restore-all"] };
+const SUBCOMMANDS = { clip: ["remove"], links: ["set", "remove"], forum: ["post", "message", "reply"], database: ["query", "batch", "export", "import", "restore", "undo-restore"], saves: ["get", "change", "replace", "reset", "copies", "copy", "restore"], secrets: ["set", "delete"], items: ["set", "remove"], "kept-rooms": ["delete", "bring-back", "erase-now", "restore", "undo-restore", "restores", "restore-all", "restore-all-status", "undo-restore-all"] };
 /** Flags every command takes. */
 const GLOBAL_FLAGS = {
   json: { hasValue: false, about: "Print the API's answer as JSON, as-is (on failure its { error }), and nothing else" },
@@ -918,6 +929,69 @@ async function drawInChrome(chromePath, manifest, textures, screen) {
     failed(error);
   } finally {
     clearTimeout(timer);
+    await chrome.close();
+  }
+}
+
+/** zaisma clip <file> --game <slug> [--still <picture>], and zaisma clip remove --game <slug>. */
+async function clip(command, values, flags) {
+  if (command === "clip remove") {
+    const answer = await api("DELETE", `/games/${flags.game}/clip`);
+    if (isJson) return printAnswer(answer);
+    console.log(`Removed ${flags.game}'s clip: its links show the share picture or cover again.\nPASS`);
+    return EXIT_CODES.done;
+  }
+  const clipBytes = await readFile(values.file).catch(() => refuse("not_a_file", { message: `${values.file} can't be read.`, field: "file", fix: "Give the clip's MP4 file, like the one play-locally's Record a clip saved." }));
+  let stillBytes;
+  if (flags.still) stillBytes = await readFile(flags.still).catch(() => refuse("not_a_file", { message: `${flags.still} can't be read.`, field: "still", fix: "Give the clip's first frame as a PNG, JPEG or WebP picture." }));
+  else {
+    const chromePath = findChrome([join(process.cwd(), ".wrangler/chrome"), join(process.cwd(), "chrome")]);
+    if (!chromePath) refuse("no_chrome", { message: "There's no Chrome on this computer to take the clip's first frame.", field: "still", fix: "Install Chrome (or set CHROME_PATH), or give the first frame with --still <picture>, like: ffmpeg -i clip.mp4 -frames:v 1 still.jpg" });
+    stillBytes = await firstFrameInChrome(chromePath, clipBytes);
+  }
+  const answer = await api("PUT", `/games/${flags.game}/clip`, { clip_base64: clipBytes.toString("base64"), still_base64: Buffer.from(stillBytes).toString("base64") });
+  if (isJson) return printAnswer(answer);
+  console.log(`${answer.review_message}\nThe clip: ${answer.clip.clip_url}\n${answer.clip.review_status === "approved" ? "PASS" : "WAITING"}`);
+  return EXIT_CODES.done;
+}
+
+/** A clip's first frame as a JPEG, decoded by the Chrome on this computer; nothing the page asks for leaves it. */
+async function firstFrameInChrome(chromePath, clipBytes) {
+  const failed = (error) => refuse("local_chrome_failed", { message: `Chrome on this computer couldn't take the clip's first frame: ${error.message}`, field: "still", fix: "Make sure the clip is an H.264 MP4 (Chromium builds may lack H.264: set CHROME_PATH to Google Chrome), or give it with --still <picture>, like: ffmpeg -i clip.mp4 -frames:v 1 still.jpg" }, EXIT_CODES.failed);
+  let chrome;
+  try {
+    chrome = await openChrome(chromePath, "zaisma-clip-still-");
+  } catch (error) {
+    failed(error);
+  }
+  try {
+    const { targetId } = await chrome.send("Target.createTarget", { url: "about:blank" });
+    const { sessionId } = await chrome.send("Target.attachToTarget", { targetId, flatten: true });
+    const send = (method, parameters) => chrome.send(method, parameters, sessionId);
+    chrome.listen(sessionId, (method, parameters) => method === "Fetch.requestPaused" && send("Fetch.failRequest", { requestId: parameters.requestId, errorReason: "BlockedByClient" }).catch(() => {}));
+    await send("Fetch.enable", { patterns: [{ urlPattern: "http*" }] });
+    const { result: evaluated, exceptionDetails } = await send("Runtime.evaluate", {
+      expression: `(async () => {
+        const video = document.createElement("video");
+        video.muted = true; video.preload = "auto";
+        video.src = URL.createObjectURL(await (await fetch("data:video/mp4;base64,${clipBytes.toString("base64")}")).blob());
+        await new Promise((done, fail) => { video.onloadeddata = done; video.onerror = () => fail(new Error("it can't play this video")); });
+        video.currentTime = 0;
+        await new Promise((done) => (video.readyState >= 2 ? done() : (video.onseeked = done)));
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        canvas.getContext("2d").drawImage(video, 0, 0);
+        return canvas.toDataURL("image/jpeg", 0.9).split(",")[1];
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (exceptionDetails) throw new Error(exceptionDetails.exception?.description?.split("\n")[0] ?? exceptionDetails.text);
+    return Buffer.from(evaluated.value, "base64");
+  } catch (error) {
+    if (error instanceof CommandError) throw error;
+    failed(error);
+  } finally {
     await chrome.close();
   }
 }
@@ -2251,6 +2325,7 @@ async function run({ command, values, flags, globalFlags, rest }) {
     return EXIT_CODES.done;
   }
   if (command === "check") return checkFolder(values, flags);
+  if (command === "clip" || command === "clip remove") return clip(command, values, flags);
   if (command === "play-locally") return playLocally(values, flags);
   if (command === "export") return exportGame(values, flags);
   if (command === "upload") {

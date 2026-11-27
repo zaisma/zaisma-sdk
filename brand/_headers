@@ -7,7 +7,9 @@
   Cache-Control: public, max-age=86400, stale-while-revalidate=604800
 
 # The font is named for its contents (README.md, Typeface), so it's kept for good. The rule above matches it too: its
-# Cache-Control is taken off first, or the two would be joined into one header.
+# Cache-Control is taken off first, or the two would be joined into one header. Any origin may load it: an email's headings ask for
+# it from inside a mail app (apps/site/src/email-layout.ts), and a font is only sent across origins when this header says so.
 /fonts/*
   ! Cache-Control
   Cache-Control: public, max-age=31536000, immutable
+  Access-Control-Allow-Origin: *

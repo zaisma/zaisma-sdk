@@ -1,0 +1,42 @@
+{
+  "name": "@zaisma/lighting-effects",
+  "version": "1.0.0",
+  "description": "Camera effects for the lighting piece: bloom on bright things, colour grading with named moods, sun rays and soft shade in corners. Each is off until a game turns it on, has its own level per device, and steps down with the lighting when frames run slow, so a phone keeps its frame rate.",
+  "license": "MIT",
+  "homepage": "https://zaisma.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zaisma/zaisma-sdk.git",
+    "directory": "pieces/lighting-effects"
+  },
+  "bugs": "https://zaisma.com/forum",
+  "keywords": [
+    "zaisma",
+    "zaisma-piece",
+    "games",
+    "browser-games",
+    "three",
+    "bloom",
+    "color-grading",
+    "god-rays",
+    "ssao",
+    "post-processing"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./piece.json": "./piece.json"
+  },
+  "files": [
+    "LICENSE.txt",
+    "README.md",
+    "index.d.ts",
+    "index.js",
+    "moods.js",
+    "piece.json",
+    "piece.json.js"
+  ]
+}

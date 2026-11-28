@@ -1,7 +1,7 @@
 {
   "name": "@zaisma/lighting",
-  "version": "1.0.0",
-  "description": "Lighting and sky for three.js: a sky with sun, moon, stars and clouds, sunlight whose shadows follow the player, fill light, reflections and fog that match the sky, all set by the time of day, with quality that fits every device from a phone up.",
+  "version": "1.1.0",
+  "description": "Lighting and sky for three.js: a sky with sun, moon, stars and clouds, sunlight whose shadows follow the player, fill light, reflections and fog that match the sky (glowing toward a low sun, and pooling low as ground fog), all set by the time of day, with quality that fits every device from a phone up.",
   "license": "MIT",
   "homepage": "https://zaisma.com",
   "repository": {

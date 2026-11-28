@@ -38,6 +38,52 @@ const MS_PER_MIN = 60_000;
 // materials only) when reflections are on: the hemisphere stays whole so Lambert and toon materials look the same with
 // reflections on or off, and the reflections add a little, mostly seen on shiny and metal surfaces.
 const FILL_SHARE_WITH_REFLECTIONS = { hemispherePct: 100, reflectionPct: 30 };
+// Ground fog's thickness at its floor at ground_fog_pct 100, per metre of view: 50 m across the floor is nearly white.
+const GROUND_FOG_DENSITY_PER_M = 0.08;
+// The fog's glow toward the sun: how much of the light's colour it adds, looking straight at a low sun.
+const FOG_SUN_GLOW_NUMBER = 0.55;
+
+// Fog that glows toward a low sun and pools low. three's own fog code is widened once, when this file is imported
+// (before a game's first material is built), so every material that takes fog takes both, shader materials too.
+// Its three values are shared by every material: each lighting writes its own into them as its sky is drawn.
+// With both at zero the fog is exactly three's own.
+const FOG_GLOW_COLOR = new Float32Array(3);
+const FOG_GLOW_DIRECTION = new Float32Array([0, 1, 0]);
+// [density per metre, 1 / height in metres, floor height in metres]; density 0 is no ground fog.
+const GROUND_FOG = new Float32Array([0, 1, 0]);
+const FOG_UNIFORMS = { fogGlowColor: { value: FOG_GLOW_COLOR }, fogGlowDirection: { value: FOG_GLOW_DIRECTION }, groundFog: { value: GROUND_FOG } };
+
+// Where the view meets the ground fog: how much of it lies between the camera and a point, as a share hidden. The
+// same in the fog code and the sky: thickest at the floor, thinning by e each height up, summed along the ray.
+const GROUND_FOG_GLSL = `
+float zaismaGroundFogAmount(vec3 rayDirection, float rayLengthM) {
+  if (groundFog.x <= 0.0) return 0.0;
+  float aboveFloor = clamp((cameraPosition.y - groundFog.z) * groundFog.y, -20.0, 80.0);
+  float climbPerM = rayDirection.y * groundFog.y;
+  float climb = clamp(climbPerM * rayLengthM, -60.0, 60.0);
+  float alongM = abs(climb) < 1e-4 ? rayLengthM : (1.0 - exp(-climb)) / climbPerM;
+  return 1.0 - exp(-groundFog.x * exp(-aboveFloor) * alongM);
+}
+vec3 zaismaFogShade(vec3 baseColor, vec3 rayDirection) {
+  return baseColor + fogGlowColor * pow(max(dot(rayDirection, fogGlowDirection), 0.0), 8.0);
+}`;
+
+function widenFog() {
+  if (THREE.ShaderChunk.fog_fragment.includes("zaismaFogShade")) return;
+  THREE.ShaderChunk.fog_pars_vertex = THREE.ShaderChunk.fog_pars_vertex.replace("varying float vFogDepth;", "varying float vFogDepth;\n\tvarying vec3 vFogOffset;");
+  // From the camera to the point, in world space: the view's turn undone (a rotation's inverse is its transpose).
+  THREE.ShaderChunk.fog_vertex = THREE.ShaderChunk.fog_vertex.replace("vFogDepth = - mvPosition.z;", "vFogDepth = - mvPosition.z;\n\tvFogOffset = ( vec4( mvPosition.xyz, 0.0 ) * viewMatrix ).xyz;");
+  THREE.ShaderChunk.fog_pars_fragment = THREE.ShaderChunk.fog_pars_fragment.replace("varying float vFogDepth;", `varying float vFogDepth;\n\tvarying vec3 vFogOffset;\n\tuniform vec3 fogGlowColor;\n\tuniform vec3 fogGlowDirection;\n\tuniform vec3 groundFog;\n${GROUND_FOG_GLSL}`);
+  THREE.ShaderChunk.fog_fragment = THREE.ShaderChunk.fog_fragment.replace(
+    "gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, fogFactor );",
+    "vec3 fogRayDirection = normalize( vFogOffset );\n\tfogFactor = 1.0 - ( 1.0 - fogFactor ) * ( 1.0 - zaismaGroundFogAmount( fogRayDirection, length( vFogOffset ) ) );\n\tgl_FragColor.rgb = mix( gl_FragColor.rgb, zaismaFogShade( fogColor, fogRayDirection ), fogFactor );",
+  );
+  // Built-in materials copy their uniforms from three's lists when built, keeping these arrays themselves (only
+  // three's own objects are cloned), so one write reaches every material.
+  for (const shader of Object.values(THREE.ShaderLib)) if (shader.uniforms?.fogColor) Object.assign(shader.uniforms, FOG_UNIFORMS);
+  Object.assign(THREE.UniformsLib.fog, FOG_UNIFORMS);
+}
+widenFog();
 
 const SKY_VERTEX = `
 varying vec3 vDirection;
@@ -62,7 +108,11 @@ uniform float sunDiscPct;
 uniform float starsPct;
 uniform float cloudsPct;
 uniform float cloudDriftM;
+uniform vec3 fogGlowColor;
+uniform vec3 fogGlowDirection;
+uniform vec3 groundFog;
 varying vec3 vDirection;
+${GROUND_FOG_GLSL}
 
 float hash3(vec3 cell) {
   cell = fract(cell * 0.3183099 + 0.1);
@@ -125,8 +175,11 @@ void main() {
   #endif
 
   color += lightColor * disc * 6.0;
-  // Under the horizon the sky is the fog's colour, so the world's edge melts into it.
-  color = mix(color, fogColor, smoothstep(0.02, -0.06, height));
+  // Under the horizon the sky is the fog's colour, glowing toward a low sun as the fog does, so the world's edge
+  // melts into it; ground fog thickens toward the horizon as it does over the ground.
+  vec3 edgeFog = zaismaFogShade(fogColor, direction);
+  color = mix(color, edgeFog, smoothstep(0.02, -0.06, height));
+  color = mix(color, edgeFog, zaismaGroundFogAmount(direction, 100000.0));
   gl_FragColor = vec4(color, 1.0);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
@@ -176,6 +229,10 @@ export function createLighting(given = {}) {
     starsPct: { value: 0 },
     cloudsPct: { value: 0 },
     cloudDriftM: { value: 0 },
+    // This lighting's own fog glow and ground fog, written into every material's as its sky is drawn.
+    fogGlowColor: { value: new Float32Array(3) },
+    fogGlowDirection: { value: new Float32Array([0, 1, 0]) },
+    groundFog: { value: new Float32Array([0, 1, 0]) },
   };
   const skyMaterial = new THREE.ShaderMaterial({ vertexShader: SKY_VERTEX, fragmentShader: SKY_FRAGMENT, uniforms: skyUniforms, side: THREE.BackSide, depthWrite: false, fog: false });
   const skyGeometry = new THREE.SphereGeometry(1, 48, 24);
@@ -183,6 +240,8 @@ export function createLighting(given = {}) {
   sky.name = "zaisma_sky";
   sky.frustumCulled = false;
   sky.renderOrder = -1000;
+  // The sky is drawn first, so the scene's materials take this lighting's fog: two lightings on one page each keep theirs.
+  sky.onBeforeRender = shareFog;
   const sun = new THREE.DirectionalLight();
   sun.name = "zaisma_sun";
   const fill = new THREE.HemisphereLight();
@@ -209,6 +268,26 @@ export function createLighting(given = {}) {
   let cloudDriftM = 0;
   let isApplyingOwnTime = false;
   const lightDirection = new THREE.Vector3(0, 1, 0);
+
+  function shareFog() {
+    FOG_GLOW_COLOR.set(skyUniforms.fogGlowColor.value);
+    FOG_GLOW_DIRECTION.set(skyUniforms.fogGlowDirection.value);
+    GROUND_FOG.set(skyUniforms.groundFog.value);
+  }
+
+  // The fog's glow toward the sun: strongest while it's low (from just under the horizon to 8 degrees up), gone by
+  // 30 degrees and at night, in the light's colour.
+  function applyFogGlow(sunElevationDeg, sunDirection) {
+    const risenPct = Math.min(Math.max((sunElevationDeg + 6) / 6, 0), 1);
+    const highPct = Math.min(Math.max((sunElevationDeg - 8) / 22, 0), 1);
+    const glowNumber = risenPct * (1 - highPct * highPct * (3 - 2 * highPct)) * FOG_SUN_GLOW_NUMBER * (settings.get("fogSunGlowPct") / 100);
+    const glowColor = new THREE.Color(look.lightColor).multiplyScalar(glowNumber);
+    skyUniforms.fogGlowColor.value.set([glowColor.r, glowColor.g, glowColor.b]);
+    skyUniforms.fogGlowDirection.value.set(sunDirection);
+    const groundFogPct = settings.get("groundFogPct");
+    skyUniforms.groundFog.value.set([(groundFogPct / 100) * GROUND_FOG_DENSITY_PER_M, 1 / settings.get("groundFogHeightM"), settings.get("groundFogFloorM")]);
+    shareFog();
+  }
 
   function checkFollowTarget(target) {
     if (target !== null && !(target instanceof THREE.Object3D)) refuse("bad_follow_target", { message: "followTarget isn't a three.js object.", field: "followTarget", fix: "Give the player's character (any THREE.Object3D), or null to follow the camera." });
@@ -261,9 +340,11 @@ export function createLighting(given = {}) {
     fill.color.set(look.fillSkyColor);
     fill.groundColor.set(look.fillGroundColor);
     fog.color.set(look.fogColor);
-    fog.near = Math.min(values.fogStartM, values.fogEndM - 0.5);
-    fog.far = values.fogEndM;
-    if (values.fogEnabled) scene.fog = fog;
+    // Ground fog needs the scene's fog in place: with fog_enabled off, the fog by distance never starts.
+    fog.near = values.fogEnabled ? Math.min(values.fogStartM, values.fogEndM - 0.5) : 1e9;
+    fog.far = values.fogEnabled ? values.fogEndM : 2e9;
+    applyFogGlow(worked.sunElevationDeg, worked.sunDirection);
+    if (values.fogEnabled || values.groundFogPct > 0) scene.fog = fog;
     else if (scene.fog === fog) scene.fog = null;
     applyFillStrength();
 

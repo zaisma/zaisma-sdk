@@ -2,10 +2,10 @@
 export default {
   "statement_version_number": 1,
   "name": "@zaisma/lighting",
-  "piece_version": "1.0.0",
+  "piece_version": "1.1.0",
   "kind": "foundation",
   "standard": "@zaisma/standard",
-  "summary": "Lighting and sky for three.js: a sky with sun, moon, stars and clouds, sunlight whose shadows follow the player, fill light, reflections and fog that match the sky, all set by the time of day, with quality that fits every device from a phone up.",
+  "summary": "Lighting and sky for three.js: a sky with sun, moon, stars and clouds, sunlight whose shadows follow the player, fill light, reflections and fog that match the sky (glowing toward a low sun, and pooling low as ground fog), all set by the time of day, with quality that fits every device from a phone up.",
   "license": "MIT",
   "entry_path": "index.js",
   "server_entry_path": null,
@@ -190,6 +190,46 @@ export default {
       "maximum_character_count": null,
       "choices": null,
       "summary": "How far from the camera the fog hides everything, in metres. Keep it inside the camera's far distance."
+    },
+    {
+      "name": "fog_sun_glow_pct",
+      "value_kind": "number",
+      "default_value": 100,
+      "minimum_number": 0,
+      "maximum_number": 300,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How warmly the fog glows toward the sun while it's low, at sunrise and sunset, in the sun's own colour: 0 keeps the fog one colour all round."
+    },
+    {
+      "name": "ground_fog_pct",
+      "value_kind": "number",
+      "default_value": 0,
+      "minimum_number": 0,
+      "maximum_number": 100,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How thick the fog pooling low over the ground is, a valley's mist or a marsh's: 0 is none, 100 hides the ground 50 metres away. It's in the fog's colour, and shows with fog_enabled off too."
+    },
+    {
+      "name": "ground_fog_height_m",
+      "value_kind": "number",
+      "default_value": 3,
+      "minimum_number": 0.1,
+      "maximum_number": 500,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How high the ground fog reaches, in metres: it thins by two thirds each this far up from its floor."
+    },
+    {
+      "name": "ground_fog_floor_m",
+      "value_kind": "number",
+      "default_value": 0,
+      "minimum_number": -10000,
+      "maximum_number": 10000,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "The height the ground fog lies on, in metres, where it's thickest: the ground's height, or a valley's floor."
     },
     {
       "name": "clouds_pct",

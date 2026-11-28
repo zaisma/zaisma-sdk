@@ -1,7 +1,7 @@
 /**
  * @zaisma/lighting: lighting and sky for three.js. One call gives a scene a sky with a sun, a moon, stars and
- * clouds, sunlight whose shadows follow the player, fill light, reflections and fog that all match the sky, set by
- * the time of day, and fits what it draws to the device.
+ * clouds, sunlight whose shadows follow the player, fill light, reflections and fog that all match the sky (glowing
+ * toward a low sun, and pooling low as ground fog), set by the time of day, and fits what it draws to the device.
  *
  * @example
  * import { createLighting } from "./pieces/@zaisma/lighting/index.js";
@@ -51,6 +51,14 @@ export interface LightingSettings {
   /** Where the fog starts and where it hides everything, in metres. Defaults 60 and 320. */
   fogStartM: number;
   fogEndM: number;
+  /** How warmly the fog glows toward the sun while it's low, in its colour, 0 to 300. Default 100. */
+  fogSunGlowPct: number;
+  /** How thick the fog pooling low over the ground is, 0 to 100: 100 hides the ground 50 metres away. Shows with fogEnabled off too. Default 0. */
+  groundFogPct: number;
+  /** How high the ground fog reaches, in metres, 0.1 to 500: it thins by two thirds each this far up. Default 3. */
+  groundFogHeightM: number;
+  /** The height the ground fog lies on, where it's thickest, in metres. Default 0. */
+  groundFogFloorM: number;
   /** How much of the sky clouds cover, 0 to 100. Not drawn at low. Default 35. */
   cloudsPct: number;
   /** Whether stars and the moon show at night. Default true. */

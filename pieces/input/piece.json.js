@@ -1,0 +1,284 @@
+// This piece's statement, piece.json, as a module for its own code to read. "zaisma pieces check --fix" writes it: never edit it.
+export default {
+  "statement_version_number": 1,
+  "name": "@zaisma/input",
+  "piece_version": "1.0.0",
+  "kind": "foundation",
+  "standard": "@zaisma/standard",
+  "summary": "Input for every device: keyboard and mouse, touch and gamepads read as one set of actions the game names, plus where the player moves and how far they turn the view, so a game plays on a phone, a laptop and a controller with no handling of its own for each.",
+  "license": "MIT",
+  "entry_path": "index.js",
+  "server_entry_path": null,
+  "file_paths": [
+    "index.js",
+    "index.d.ts",
+    "piece.json.js",
+    "README.md",
+    "LICENSE.txt"
+  ],
+  "server_file_paths": [],
+  "needs": [
+    {
+      "name": "@zaisma/piece",
+      "version_range": "^1.0.0",
+      "kind": "piece"
+    }
+  ],
+  "settings": [
+    {
+      "name": "input_enabled",
+      "value_kind": "boolean",
+      "default_value": true,
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "Whether the player's input is read. Turned off (while a menu or a chat box is open), moving and turning stop, every action is let go and the page's own keys work again."
+    },
+    {
+      "name": "mouse_look_mode",
+      "value_kind": "choice",
+      "default_value": "pointer_lock",
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": [
+        "pointer_lock",
+        "hold_button",
+        "off"
+      ],
+      "summary": "How the mouse turns the view: pointer_lock hides the pointer on a click and every move turns; hold_button turns only while mouse_look_button is held, keeping the pointer for menus; off leaves the mouse to the game."
+    },
+    {
+      "name": "mouse_look_button",
+      "value_kind": "choice",
+      "default_value": "right",
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": [
+        "left",
+        "right",
+        "middle"
+      ],
+      "summary": "The mouse button held to turn the view when mouse_look_mode is hold_button."
+    },
+    {
+      "name": "mouse_look_rad_per_px",
+      "value_kind": "number",
+      "default_value": 0.0022,
+      "minimum_number": 0.0001,
+      "maximum_number": 0.05,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How far the view turns for each pixel the mouse moves, in radians: the mouse sensitivity."
+    },
+    {
+      "name": "raw_mouse_enabled",
+      "value_kind": "boolean",
+      "default_value": true,
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "Whether a locked mouse is read as it moves, without the computer's pointer acceleration, where the browser allows it, so the same hand movement always turns the same amount."
+    },
+    {
+      "name": "invert_look_y_enabled",
+      "value_kind": "boolean",
+      "default_value": false,
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "Whether pushing up looks down, on every device."
+    },
+    {
+      "name": "touch_controls_enabled",
+      "value_kind": "boolean",
+      "default_value": true,
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "Whether the piece draws its touch controls (the stick and a button for each action with a touch label). Off, touches still move and turn the view, and the game draws its own buttons and presses actions with setTouchHeld."
+    },
+    {
+      "name": "touch_stick_radius_px",
+      "value_kind": "number",
+      "default_value": 56,
+      "minimum_number": 24,
+      "maximum_number": 160,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How far the thumb moves from where it landed to push the stick all the way, in CSS pixels."
+    },
+    {
+      "name": "touch_stick_dead_zone_pct",
+      "value_kind": "number",
+      "default_value": 10,
+      "minimum_number": 0,
+      "maximum_number": 60,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How much of the stick's radius a thumb moves before the character starts to move, so a resting thumb stands still."
+    },
+    {
+      "name": "touch_stick_follows_enabled",
+      "value_kind": "boolean",
+      "default_value": true,
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "Whether the stick follows a thumb that slides past its edge, so turning back responds at once instead of crossing the whole stick."
+    },
+    {
+      "name": "touch_stick_zone_pct",
+      "value_kind": "number",
+      "default_value": 50,
+      "minimum_number": 10,
+      "maximum_number": 90,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How much of the screen's width, from the left, starts the stick where a thumb lands; a touch anywhere else turns the view."
+    },
+    {
+      "name": "touch_look_rad_per_px",
+      "value_kind": "number",
+      "default_value": 0.006,
+      "minimum_number": 0.0005,
+      "maximum_number": 0.05,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How far the view turns for each pixel a finger drags, in radians."
+    },
+    {
+      "name": "touch_button_size_px",
+      "value_kind": "number",
+      "default_value": 72,
+      "minimum_number": 40,
+      "maximum_number": 140,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How wide the first touch button is, in CSS pixels; the others are a little smaller around it."
+    },
+    {
+      "name": "gamepad_move_dead_zone_pct",
+      "value_kind": "number",
+      "default_value": 15,
+      "minimum_number": 0,
+      "maximum_number": 60,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How far the move stick is pushed before the character moves, so a worn stick never drifts. Past it, moving starts from nothing."
+    },
+    {
+      "name": "gamepad_look_dead_zone_pct",
+      "value_kind": "number",
+      "default_value": 12,
+      "minimum_number": 0,
+      "maximum_number": 60,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How far the look stick is pushed before the view turns."
+    },
+    {
+      "name": "gamepad_look_rad_per_sec",
+      "value_kind": "number",
+      "default_value": 3.2,
+      "minimum_number": 0.1,
+      "maximum_number": 20,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How fast the view turns with the look stick pushed all the way, in radians a second."
+    },
+    {
+      "name": "gamepad_fine_aim_pct",
+      "value_kind": "number",
+      "default_value": 20,
+      "minimum_number": 0,
+      "maximum_number": 100,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How much finer small pushes of the look stick are than big ones, for aiming: at 0 the view turns as far as the stick is pushed; higher keeps small pushes slow while a full push still turns at full speed (the push is raised to the power 1 + 3 × this ÷ 100)."
+    },
+    {
+      "name": "gamepad_trigger_press_pct",
+      "value_kind": "number",
+      "default_value": 40,
+      "minimum_number": 5,
+      "maximum_number": 95,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How far a trigger is pulled before an action bound to it is held. How far it's pulled is always read with pressedPctOf."
+    },
+    {
+      "name": "gamepad_sticks_swapped_enabled",
+      "value_kind": "boolean",
+      "default_value": false,
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "Whether the right stick moves and the left one turns the view, for players who hold it that way."
+    },
+    {
+      "name": "gamepad_label_style",
+      "value_kind": "choice",
+      "default_value": "auto",
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": [
+        "auto",
+        "xbox",
+        "playstation",
+        "nintendo"
+      ],
+      "summary": "Which controller's names labelsOf gives gamepad buttons: auto names them after the gamepad in the player's hands."
+    },
+    {
+      "name": "rumble_enabled",
+      "value_kind": "boolean",
+      "default_value": true,
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "Whether rumble shakes a gamepad, or a phone that can vibrate. Off, rumble does nothing."
+    }
+  ],
+  "hooks": [
+    {
+      "name": "device_changed",
+      "hook_kind": "event",
+      "summary": "Told during update when the player starts using another kind of device, with its kind: keyboard_mouse, touch or gamepad. Change the prompts on screen here."
+    },
+    {
+      "name": "action_pressed",
+      "hook_kind": "event",
+      "summary": "Told during update when an action is pressed, with { actionName, deviceKind }, in the order the game named its actions."
+    },
+    {
+      "name": "action_released",
+      "hook_kind": "event",
+      "summary": "Told during update when an action is let go, with { actionName, deviceKind }."
+    },
+    {
+      "name": "pointer_lock_changed",
+      "hook_kind": "event",
+      "summary": "Told when the pointer is locked to the game or let go (the player pressed Escape), with whether it's locked now. Show a click-to-play prompt here."
+    },
+    {
+      "name": "before_move",
+      "hook_kind": "decision",
+      "summary": "Asked during update with where the player wants to move, { x, y }; answer another { x, y } to change it (reversed controls, a slow while aiming), or nothing to leave it. Its length is kept to 1 at most."
+    },
+    {
+      "name": "before_look",
+      "hook_kind": "decision",
+      "summary": "Asked during update with how far the player turned the view this frame in radians, { x, y }; answer another { x, y } to change it (a slower turn while aiming, aim assist), or nothing to leave it."
+    }
+  ]
+};

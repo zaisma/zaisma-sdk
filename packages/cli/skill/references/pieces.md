@@ -120,6 +120,7 @@ In code a name is in the language's own style (`dash_speed_m_per_sec` is `dashSp
 | Piece | Kind and standard | Gives | Needs |
 | --- | --- | --- | --- |
 | `@zaisma/piece` | `foundation`, its own small standard `@zaisma/piece` | How a JavaScript piece opens its settings and hooks, the same in every piece, in a browser and on a game server. A game never adds it by name: it comes with any piece that needs it. | nothing |
+| [`@zaisma/input`](https://github.com/zaisma/zaisma-sdk/blob/main/pieces/input) | `foundation`, `@zaisma/standard` | Input for every device: keyboard and mouse, touch (a stick, a drag to look and a button for each action, drawn for it) and gamepads, read as the actions a game names, where the player moves and how far they turn the view in radians. Prompts as each device names its buttons, a controls screen's rebinding, and rumble. | `@zaisma/piece` |
 
 Zaisma's foundations are built on the standard `@zaisma/standard`; the skeleton and its animation names are a small standard of their own, `@zaisma/skeleton`, so another maker's standard can build on just that.
 

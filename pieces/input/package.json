@@ -1,0 +1,39 @@
+{
+  "name": "@zaisma/input",
+  "version": "1.0.0",
+  "description": "Input for every device: keyboard and mouse, touch and gamepads read as one set of actions the game names, plus where the player moves and how far they turn the view, so a game plays on a phone, a laptop and a controller with no handling of its own for each.",
+  "license": "MIT",
+  "homepage": "https://zaisma.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zaisma/zaisma-sdk.git",
+    "directory": "pieces/input"
+  },
+  "bugs": "https://zaisma.com/forum",
+  "keywords": [
+    "zaisma",
+    "zaisma-piece",
+    "games",
+    "browser-games",
+    "input",
+    "gamepad",
+    "touch-controls",
+    "keyboard"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./piece.json": "./piece.json"
+  },
+  "files": [
+    "LICENSE.txt",
+    "README.md",
+    "index.d.ts",
+    "index.js",
+    "piece.json",
+    "piece.json.js"
+  ]
+}

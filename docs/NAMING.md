@@ -21,7 +21,8 @@ A name has up to three parts: **what it's about**, **what kind of value**, **in 
 | Rate | `<things>_per_<unit>` | number | `ticks_per_sec`, `posts_per_day` |
 | Size | `size_bytes`, `<what>_size_bytes` | integer | `size_bytes: 52000` |
 | On-screen length | `width_px`, `height_px`, `<what>_px` | number | `width_px: 1920` |
-| Angle | `<what>_deg` | number | `rotation_deg: 35` |
+| Angle | `<what>_deg`, or `<what>_rad` in a game's 3D maths | number | `rotation_deg: 35`, `mouse_look_rad_per_px` |
+| Point or direction in space | `<what>_<unit>`, holding `x`, `y` and `z` as every engine names them; a part on its own is `<what>_x_<unit>` | `{ x, y }` or `{ x, y, z }` | `look_rad: { x, y }`, `look_x_rad`; a push of length 1 at most, like a stick's, needs no unit: `move: { x, y }` |
 | Share | `<what>_pct` | number, 0 to 100 | `returned_pct: 42` |
 | Yes or no | `is_`, `has_` or `can_` first; `<setting>_enabled` for a setting someone switches; a verb for an input that asks for an action | boolean | `is_live`, `cloud_saves_enabled`, `reopen: true` |
 | Choice | `<what>_status`, `_kind` or `_mode`, or the setting's own name | one of a fixed list | `scan_status: "held"`, `visibility: "listed"` |
@@ -45,6 +46,7 @@ The only unit suffixes:
 | `_bytes` | bytes |
 | `_px` | CSS pixels |
 | `_deg` | degrees |
+| `_rad` | radians, for angles a game's 3D maths uses as they are (three.js turns in radians) |
 | `_pct` | percent, 0 to 100 (never 0 to 1) |
 | `_cents` | US cents, a number that may have a fraction (`review_cost_cents`); Stripe works in cents too |
 | `_minor_units` | the smallest unit of the currency in the `currency_code` beside it (cents, pence; yen are whole), as Stripe counts amounts (`price_minor_units`) |
@@ -67,7 +69,7 @@ A length of time says so in its name. `duration` is the default; four words say 
 
 ## Rules
 
-1. **Whole words.** The only short forms are the units above, `id`/`ids`, `url` and `sha256`, plus `i` for a loop index in code. Not `dt`, `dx`, `msg`, `opts`, `pos`, `t`, `num`, `max`, `min`, `cfg`, `res`, `err`, `e`.
+1. **Whole words.** The only short forms are the units above, `id`/`ids`, `url` and `sha256`, `x`, `y` and `z` for a point's or direction's parts, plus `i` for a loop index in code. Not `dt`, `dx`, `msg`, `opts`, `pos`, `t`, `num`, `max`, `min`, `cfg`, `res`, `err`, `e`.
 2. **Minimum and maximum are spelled out**, as the first word: `minimum_player_count`, `maximum_player_count`. `_min` at the end always means minutes.
 3. **Vague nouns get a subject.** `data`, `info`, `value`, `result` and `context` never stand alone: `join_data`, `failure_context`.
 4. **One type and one unit per field.** No "a number or false", no "a string or a number". A setting with modes is a choice plus a separate number: `idle_check: "server" | "client" | "off"` and `idle_timeout_sec: 600`, not `idleAfter: 600 | false | "client"`.
@@ -459,6 +461,7 @@ One name per concept. The API and MCP column is snake_case; the SDK and game ser
 | A piece's listing's own pictures | `cover_image` (one, or `null`) and `images` on a piece, each `{ id, kind, image_url, width_px, height_px, size_bytes, sha256 }` with `kind` `cover` or `gallery_picture`, as a game's; the command's `listing_pictures`, each with `picture_status` (`sent`, `kept`, `removed`, `refused`) | `thumbnail`, `screenshots`, `cover_url`, `listing_images` |
 | Looking at a file of a piece before getting it | `preview_kind` on a version's file (`picture`, `sound`, `model`, or `null`) and `preview_url`; a listing's `file_page_index` | `thumbnail_url`, `download_url`, `asset_type`, `page` |
 | What a developer thinks of a piece, and telling Zaisma about one | `rating` (`like`, `dislike`), `like_count`, `dislike_count`, `your_rating`; `report_reason`, `details` | `stars`, `score`, `review`, `flag` |
+| Input for every device (`@zaisma/input`): the kinds of device, a game's actions and what they're bound to | `device_kind` (`keyboard_mouse`, `touch`, `gamepad`); its settings `input_enabled`, `mouse_look_mode` (`pointer_lock`, `hold_button`, `off`), `mouse_look_button`, `mouse_look_rad_per_px`, `raw_mouse_enabled`, `invert_look_y_enabled`, `touch_controls_enabled`, `touch_stick_radius_px`, `touch_stick_dead_zone_pct`, `touch_stick_follows_enabled`, `touch_stick_zone_pct`, `touch_look_rad_per_px`, `touch_button_size_px`, `gamepad_move_dead_zone_pct`, `gamepad_look_dead_zone_pct`, `gamepad_look_rad_per_sec`, `gamepad_fine_aim_pct`, `gamepad_trigger_press_pct`, `gamepad_sticks_swapped_enabled`, `gamepad_label_style` (`auto`, `xbox`, `playstation`, `nintendo`), `rumble_enabled`; hooks `device_changed`, `action_pressed`, `action_released`, `pointer_lock_changed`, `before_move`, `before_look`; errors `unknown_action`, `unknown_argument`, `bad_argument`, `bad_binding`, `unknown_control`, `no_page` | `createInput`; `input.move`, `input.lookRad`, `isHeld`, `wasPressed`, `wasReleased`, `pressedPctOf`, `bindings` (each a `Binding`: `keys`, `mouseButtons`, `gamepadButtons`, `touchLabel`), `setBinding`, `setBindings`, `resetBindings`, `captureBinding` (answers `{ actionName, controlKind, controlName }`, `controlKind` `key`, `mouse_button`, `gamepad_button`), `labelsOf`, `setTouchHeld`, `rumble({ strongPct, weakPct, durationMs })`, `snapshot()` (`moveX`, `moveY`, `lookXRad`, `lookYRad`, `heldActionNames`); `MOVE_ACTION_NAMES` (`moveForward`, `moveBack`, `moveLeft`, `moveRight`), `GAMEPAD_BUTTON_NAMES` (by place: `face_bottom` …), `MOUSE_BUTTON_NAMES` |
 | What an error or a review reason is, and its other parts | `code`; `message`, `field`, `fix`, `retry_after_sec` (inside `error` only); `content_rule` (inside `review_reason` and `findings` only) | `code` (on the error only) |
 
 ## Adding a field, option or tool

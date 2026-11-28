@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { createBrotliDecompress, createGunzip } from "node:zlib";
 import { CHECKED_TEXT_EXTENSIONS, GAME_FILE_EXTENSIONS, PRECOMPRESSED_EXTENSIONS, checkGameFiles, extensionOf, findOutsideReferences } from "./check.mjs";
 import { assetHeadSizes } from "./performance.mjs";
-import { PiecesError, addPiece, checkPiece, listPieces, newerPieces, removePiece, updatePiece } from "./pieces.mjs";
+import { PIECE_KINDS, PiecesError, addPiece, checkPiece, listPieces, readPiece, writePieceCopy, newerPieces, newestSatisfying, parseVersion, readListingPictures, LISTING_FOLDER, readPieceForPublishing, removePiece, updatePiece } from "./pieces.mjs";
 import { findChrome, openChrome } from "./chrome.mjs";
 import { SHADER_CHECK_PAGE, SHADER_LIMITS, isShaderCheckPassing, shaderCheckPageExpressions, shaderDraftAnswer, shaderRenderFromPage, shaderRenderInputOf } from "./shader-check.mjs";
 
@@ -113,6 +113,7 @@ const TEXTURE_CHECK_COUNT = 20;
 
 /** The choices the API takes, checked before anything is sent (test/node/cli.test.ts holds them to the API's lists). */
 const VISIBILITIES = ["listed", "unlisted", "private", "draft"];
+const PIECE_VISIBILITIES = ["private", "unlisted", "listed"];
 const SCREENS = ["wide", "phone"];
 const MATCH_UPDATE_MODES = ["next_match", "now"];
 const TOPIC_KINDS = ["bug", "gap", "feature", "question", "talk"];
@@ -160,11 +161,13 @@ const COMMAND_ERROR_CODES = {
   unexpected_answer: "Zaisma answered without JSON, like a page from a network in between.",
   skill_not_ours: "skill: a zaisma skill this command didn't install is already in that folder, so nothing was written; field names the folder.",
   install_not_confirmed: "skill: nothing was installed, since nobody answered the question: give --yes to install without it.",
-  bad_piece_statement: "pieces: a piece's piece.json isn't one: field names what's wrong in it.",
-  piece_statement_newer: "pieces: a piece's piece.json is written for a newer command than this one: run the newest.",
   bad_piece_source: "pieces: what was given isn't a piece's folder, its .tgz or a name on npm, or its archive can't be trusted.",
   piece_not_found: "pieces: there's no such piece or version where it was looked for.",
   piece_source_unreachable: "pieces: npm couldn't be reached, so nothing was changed.",
+  piece_not_addable: "pieces add: the piece is a skill or a tool, which a game never holds: pieces get fetches it.",
+  piece_folder_not_empty: "pieces get: the folder already holds files that aren't a copy of the piece.",
+  piece_not_ready: "pieces publish: the piece's own check found something that refuses it, so nothing was sent.",
+  piece_file_changed: "pieces: a file fetched from Zaisma's marketplace isn't the one its version lists, so nothing was changed.",
   piece_already_added: "pieces add: the game already has this piece at another version; a piece moves to another version only with pieces update.",
   piece_not_added: "pieces update, pieces remove: the game has no such piece.",
   piece_version_clash: "pieces: two pieces need versions of the same thing that don't overlap, so nothing was changed; the error says both versions and the ways out.",
@@ -439,14 +442,33 @@ const COMMANDS = {
     flags: { folder: GAME_FOLDER },
   },
   "pieces check": {
-    about: "Check a piece you're making before you publish it: its piece.json, the files it lists, that every import is a listed file or a stated need, and its package.json beside it",
+    about: "Check a piece you're making before you publish it: its piece.json, the files it lists, that every import is a listed file or a stated need, its package.json beside it, and for a pack or preset what opening every file finds (No code, or Contains code)",
     arguments: [{ name: "folder" }],
-    flags: { fix: { hasValue: false, about: "Write piece.json.js again from piece.json first, when the piece has one" } },
+    flags: { fix: { hasValue: false, about: "Write piece.json.js again from piece.json first, when the piece has one; for a pack, list every file in its folder in file_paths" } },
+  },
+  "pieces publish": {
+    about: "Publish a new version of a piece to Zaisma's marketplace (zaisma.com/marketplace): its own check first, then its piece.json and exactly the files it lists, then Zaisma's fixed checks. The first version makes the piece, private until you list it. A published version never changes: raise piece_version for the next",
+    arguments: [{ name: "folder" }],
+    flags: { visibility: { hasValue: true, placeholder: PIECE_VISIBILITIES.join("|"), choices: PIECE_VISIBILITIES, about: "Who can find and fetch it: private (only you; a new piece's default), unlisted (anyone who has its name) or listed (on the marketplace)" } },
+  },
+  "pieces search": {
+    about: "Search Zaisma's marketplace for pieces: foundations, extensions, game systems, templates, packs, presets, skills and tools, the best rated first",
+    arguments: [{ name: "search_text", isOptional: true }],
+    flags: {
+      kind: { hasValue: true, placeholder: PIECE_KINDS.join("|"), choices: PIECE_KINDS, about: "Only pieces of this kind" },
+      standard: { hasValue: true, placeholder: "<name>", about: "Only pieces built on this standard, like @zaisma/standard" },
+      sort: { hasValue: true, placeholder: "quality|newest", choices: ["quality", "newest"], about: "quality (the default): the best rated first; newest: the latest changed first" },
+    },
+  },
+  "pieces get": {
+    about: "Fetch a piece's files into a folder of its own, running nothing: how a skill reaches your AI and a tool your computer, since a game holds neither. A copy already there is replaced, and what changed since it is said. A skill goes into this project's AI tools' skills folders unless --to says where; anything else into ./<its name>",
+    arguments: [{ name: "source" }],
+    flags: { to: { hasValue: true, placeholder: "<folder>", about: "The folder to write it into" }, "dry-run": DRY_RUN },
   },
   help: { about: "This help; with --json, every command, flag, exit code and error code", arguments: [], flags: {} },
 };
 /** Commands with a second word, like zaisma forum post. */
-const SUBCOMMANDS = { pieces: ["add", "update", "remove", "newer", "check"], clip: ["remove"], links: ["set", "remove"], forum: ["post", "message", "reply"], database: ["query", "batch", "export", "import", "restore", "undo-restore"], saves: ["get", "change", "replace", "reset", "copies", "copy", "restore"], secrets: ["set", "delete"], items: ["set", "remove"], "kept-rooms": ["delete", "bring-back", "erase-now", "restore", "undo-restore", "restores", "restore-all", "restore-all-status", "undo-restore-all"] };
+const SUBCOMMANDS = { pieces: ["add", "update", "remove", "newer", "check", "publish", "search", "get"], clip: ["remove"], links: ["set", "remove"], forum: ["post", "message", "reply"], database: ["query", "batch", "export", "import", "restore", "undo-restore"], saves: ["get", "change", "replace", "reset", "copies", "copy", "restore"], secrets: ["set", "delete"], items: ["set", "remove"], "kept-rooms": ["delete", "bring-back", "erase-now", "restore", "undo-restore", "restores", "restore-all", "restore-all-status", "undo-restore-all"] };
 /** Flags every command takes. */
 const GLOBAL_FLAGS = {
   json: { hasValue: false, about: "Print the API's answer as JSON, as-is (on failure its { error }), and nothing else" },
@@ -2522,8 +2544,202 @@ async function updateSkillCopies() {
   if (skillUpdates.length && !isJson) console.error(`Updated the Zaisma skill in ${skillUpdates.length} ${skillUpdates.length === 1 ? "AI tool" : "AI tools"} to ${CLI_VERSION}.`);
 }
 
-/** zaisma pieces: a game's shared building blocks (pieces.mjs). Nothing reaches Zaisma: it reads and writes the game's folder. */
+/** A piece's file from Zaisma's marketplace, as bytes: an error answers as the API's errors do, a key's say over fetching among them. */
+async function pieceFileBytes(name, pieceVersion, filePath) {
+  let response;
+  try {
+    response = await fetch(`${API}/api/dev/pieces/${encodeURIComponent(name)}/versions/${encodeURIComponent(pieceVersion)}/file?path=${encodeURIComponent(filePath)}`, { headers: { authorization: `Bearer ${KEY}`, "x-zaisma-client": "cli", "user-agent": `zaisma-cli/${CLI_VERSION}` } });
+  } catch {
+    throw new PiecesError("piece_source_unreachable", { message: `${API} couldn't be reached.`, field: "source", fix: "Check the connection and run it again; nothing was changed." });
+  }
+  if (!response.ok) {
+    const answer = await response.json().catch(() => null);
+    throw new CommandError(answer?.error ?? { code: "unexpected_answer", message: `Zaisma answered ${response.status} for ${filePath}.`, field: null, fix: "Run it again in a minute.", retry_after_sec: 60 }, EXIT_CODES.failed.exitCode);
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
+
+/**
+ * Zaisma's marketplace as pieces.mjs asks it, or null with no key: a piece there is fetched with the developer's key,
+ * so what the key may fetch holds (none, only what the developer said yes to, or any). A name the marketplace doesn't
+ * have answers null, and the lookup goes on to npm.
+ */
+function marketplaceReader() {
+  if (!KEY) return null;
+  const asked = new Map();
+  const pieceOf = (name) => {
+    if (!asked.has(name)) asked.set(name, api("GET", `/pieces/${encodeURIComponent(name)}`).then((answer) => answer.piece, (error) => (error instanceof CommandError && error.error.code === "no_piece" ? null : Promise.reject(error))));
+    return asked.get(name);
+  };
+  const passedVersionsOf = async (name) => (await pieceOf(name))?.versions.filter((version) => version.scan_status === "approved" && parseVersion(version.piece_version)).map((version) => version.piece_version) ?? null;
+  return {
+    versionsOf: async (name) => {
+      const versions = await passedVersionsOf(name);
+      return versions && Object.fromEntries(versions.map((version) => [version, {}]));
+    },
+    archiveOf: async (name, ranges) => {
+      const versions = await passedVersionsOf(name);
+      const pieceVersion = versions && newestSatisfying(versions, ranges);
+      if (!pieceVersion) return null;
+      const { version } = await api("GET", `/pieces/${encodeURIComponent(name)}/versions/${pieceVersion}`);
+      const allFiles = {};
+      for (const file of version.files) {
+        const bytes = await pieceFileBytes(name, pieceVersion, file.path);
+        // What was checked is what's written: each file against the hash its version lists.
+        if (createHash("sha256").update(bytes).digest("hex") !== file.sha256) throw new PiecesError("piece_file_changed", { message: `${file.path} of ${name} ${pieceVersion} isn't the file its version lists: its hash differs.`, field: "source", fix: "Nothing was changed. Run it again; if it keeps happening, don't use this version, and tell Zaisma: zaisma forum message --kind bug." });
+        allFiles[file.path] = bytes;
+      }
+      return { version: pieceVersion, allFiles, whereFrom: `${name} ${pieceVersion} on Zaisma's marketplace` };
+    },
+  };
+}
+
+/** zaisma pieces publish: the maker's check, the files Zaisma doesn't have yet, the version, then its checks. */
+async function publishPiece(folder, flags) {
+  const checked = await checkPiece(folder);
+  if (!checked.is_ready) {
+    if (!isJson) for (const problem of checked.problems.filter((each) => each.problem_kind === "refused")) console.log(`Refused  ${problem.path ? `${problem.path}: ` : ""}${problem.message}\n         ${problem.fix}`);
+    const first = checked.problems.find((problem) => problem.problem_kind === "refused");
+    throw new CommandError({ code: "piece_not_ready", message: `The piece's own check refuses it: ${first.message}`, field: "folder", fix: `${first.fix} zaisma pieces check ${folder} shows everything it found.`, retry_after_sec: null }, EXIT_CODES.problems_found.exitCode);
+  }
+  const piece = await readPieceForPublishing(folder);
+  const files = Object.entries(piece.files).map(([filePath, bytes]) => ({ path: filePath, sha256: createHash("sha256").update(bytes).digest("hex"), size_bytes: bytes.length, full: join(folder, ...filePath.split("/")) }));
+  const list = files.map(({ full: _, ...file }) => file);
+  const plan = await api("POST", "/pieces/uploads", { files: list });
+  const todo = files.filter((file, i) => plan.missing_file_hashes.includes(file.sha256) && files.findIndex((other) => other.sha256 === file.sha256) === i);
+  say(todo.length ? `Sending ${todo.length} new or changed files (${readableSize(todo.reduce((sumBytes, file) => sumBytes + file.size_bytes, 0))})…` : "Zaisma has every file already; making the version from them.");
+  for (const file of todo) {
+    if (file.size_bytes > DIRECT_BYTES) await sendInParts(file, () => {});
+    else await api("PUT", `/files/${file.sha256}`, new Uint8Array(piece.files[file.path]));
+  }
+  const { name, piece_version: pieceVersion } = piece.statement;
+  let answer = await api("POST", "/pieces", { files: list, ...(flags.visibility ? { visibility: flags.visibility } : {}) });
+  const published = answer.piece;
+  const listingPictures = await sendListingPictures(folder, name);
+  say(`${name} ${pieceVersion} is being checked. This usually takes under a minute…`);
+  for (let i = 0; i < SCAN_CHECK_COUNT && answer.version.scan_status === "scanning"; i++) {
+    await sleep(SCAN_CHECK_INTERVAL_MS);
+    answer = await api("GET", `/pieces/${encodeURIComponent(name)}/versions/${pieceVersion}`);
+  }
+  const { version } = answer;
+  if (isJson) printJson({ piece: published, version, listing_pictures: listingPictures });
+  if (version.scan_status === "scanning") {
+    say(`Still being checked. Look later with: zaisma pieces search ${name}`);
+    return EXIT_CODES.still_scanning;
+  }
+  if (version.scan_status === "approved") {
+    if (isJson) return EXIT_CODES.done;
+    console.log(`Passed: ${name} ${pieceVersion} is its newest version.${version.contents_kind ? ` Marked ${version.contents_kind === "files_only" ? "No code: no scripts or code in it" : "Contains code"}.` : ""}`);
+    console.log(published.visibility === "private" ? `It's private: only you fetch it. List it with: zaisma pieces publish ${folder} --visibility listed (on its next version), or ask your AI to list it.` : `Its listing: ${published.listing_url}`);
+    return EXIT_CODES.done;
+  }
+  if (!isJson) {
+    console.log(version.scan_status === "held" ? "Held for a person at Zaisma to look at. Why:" : "Refused. Why:");
+    for (const finding of version.findings) console.log(`  ${finding.path ? `${finding.path}: ` : ""}${finding.message}\n    ${finding.fix}`);
+  }
+  return version.scan_status === "held" ? EXIT_CODES.held : EXIT_CODES.rejected;
+}
+
+/**
+ * Makes a piece's listing show the pictures its folder keeps under listing/ (readListingPictures): a cover that isn't
+ * the listing's already is sent, a gallery picture that isn't there is sent, and one the folder no longer has is taken
+ * away. With no listing folder nothing changes. A picture Zaisma refuses never fails the publish: each one's outcome
+ * is answered, as { path, kind, picture_status, problem }.
+ */
+async function sendListingPictures(folder, name) {
+  const pictures = await readListingPictures(folder);
+  if (!pictures) return [];
+  const address = `/pieces/${encodeURIComponent(name)}`;
+  const { piece } = await api("GET", address);
+  const outcomes = [];
+  const send = async (file, kind) => {
+    const sha256 = createHash("sha256").update(file.bytes).digest("hex");
+    if (piece.images.some((image) => image.kind === kind && image.sha256 === sha256)) return outcomes.push({ path: file.path, kind, picture_status: "kept", problem: null });
+    try {
+      await api("POST", `${address}/images?kind=${kind}`, file.bytes);
+      outcomes.push({ path: file.path, kind, picture_status: "sent", problem: null });
+    } catch (error) {
+      if (!(error instanceof CommandError)) throw error;
+      outcomes.push({ path: file.path, kind, picture_status: "refused", problem: { code: error.error.code, message: error.error.message, fix: error.error.fix } });
+      say(`${file.path} wasn't taken: ${error.error.message} ${error.error.fix}`);
+    }
+  };
+  if (pictures.gallery) {
+    // What the folder no longer has goes first, so the gallery never passes its limit on the way.
+    const folderHashes = new Set(pictures.gallery.map((file) => createHash("sha256").update(file.bytes).digest("hex")));
+    for (const image of piece.images.filter((each) => each.kind === "gallery_picture" && !folderHashes.has(each.sha256))) {
+      await api("DELETE", `${address}/images/${image.id}`);
+      outcomes.push({ path: null, kind: "gallery_picture", picture_status: "removed", problem: null });
+    }
+  }
+  if (pictures.cover) await send(pictures.cover, "cover");
+  for (const file of pictures.gallery ?? []) await send(file, "gallery_picture");
+  const sentCount = outcomes.filter((outcome) => outcome.picture_status === "sent").length;
+  if (sentCount) say(`Sent ${sentCount} listing ${sentCount === 1 ? "picture" : "pictures"} from ${LISTING_FOLDER}/.`);
+  return outcomes;
+}
+
+/** zaisma pieces search: the marketplace's listed pieces that fit. */
+async function searchPieces(values, flags) {
+  const query = new URLSearchParams(Object.entries({ search_text: values.search_text, kind: flags.kind, standard: flags.standard, sort: flags.sort }).filter(([, given]) => given !== undefined && given !== ""));
+  const answer = await api("GET", `/marketplace${query.size ? `?${query}` : ""}`);
+  if (isJson) return printAnswer(answer);
+  if (!answer.pieces.length) console.log("No pieces match.");
+  for (const piece of answer.pieces) {
+    const ratingCount = piece.like_count + piece.dislike_count;
+    console.log(`${piece.name} ${piece.piece_version}  ${piece.kind}${piece.standard ? `, standard ${piece.standard}` : ""}, ${piece.is_open_source ? piece.license : "closed source"}${piece.contents_kind ? `, ${piece.contents_kind === "files_only" ? "no code" : "contains code"}` : ""}, ${ratingCount ? `${Math.round((piece.like_count / ratingCount) * 100)}% liked of ${ratingCount}` : "no ratings yet"}`);
+    console.log(`    ${piece.summary}`);
+    console.log(`    ${piece.get_command}`);
+  }
+  if (answer.next_cursor) console.log("More match: narrow it with --kind or more words.");
+  return EXIT_CODES.done;
+}
+
+/** zaisma pieces get: a piece's files into a folder of its own; a skill into each AI tool's skills folder this project has. */
+async function fetchPiece(values, flags) {
+  const isDryRun = Boolean(flags["dry-run"]);
+  // Read once; where it goes depends on what it is.
+  const piece = await readPiece(values.source, { marketplace: marketplaceReader() });
+  const shortName = piece.name.split("/").pop();
+  let folders;
+  if (flags.to !== undefined) folders = [resolve(flags.to)];
+  else if (piece.kind === "skill") {
+    const found = [];
+    for (const tool of SKILL_TOOLS) if (tool.isAlwaysWritten || (await stat(join(process.cwd(), tool.toolFolder)).catch(() => null))?.isDirectory()) found.push(join(process.cwd(), tool.toolFolder, "skills", shortName));
+    folders = found;
+  } else folders = [resolve(shortName)];
+  const answers = [];
+  for (const folder of folders) answers.push(await writePieceCopy(piece, folder, { isDryRun }));
+  if (isJson) return printAnswer({ fetched_copies: answers });
+  for (const fetched of answers) {
+    console.log(`${isDryRun ? "Would fetch" : "Fetched"} ${fetched.name} ${fetched.piece_version} (${fetched.kind}) into ${fetched.folder}`);
+    if (fetched.earlier_piece_version) {
+      const changed = [...fetched.changed_paths.map((filePath) => `changed ${filePath}`), ...fetched.added_paths.map((filePath) => `new ${filePath}`), ...fetched.removed_paths.map((filePath) => `gone ${filePath}`)];
+      console.log(changed.length ? `    since ${fetched.earlier_piece_version}: ${changed.join(", ")}` : `    the same as the ${fetched.earlier_piece_version} that was there`);
+    }
+  }
+  if (piece.kind === "skill") console.log("A skill is another developer's instructions to your AI: read its SKILL.md before your AI follows it.");
+  return EXIT_CODES.done;
+}
+
+/**
+ * zaisma pieces: a game's shared building blocks (pieces.mjs). It reads and writes the game's folder; a piece named by
+ * its name is looked up on Zaisma's marketplace when ZAISMA_KEY is set, then on npm, and publish, search and get reach the marketplace.
+ */
 async function pieces(command, values, flags) {
+  if (command === "pieces search") return searchPieces(values, flags);
+  if (command === "pieces publish" || command === "pieces get") {
+    try {
+      if (command === "pieces get") return await fetchPiece(values, flags);
+      const pieceFolder = resolve(values.folder);
+      if (!(await stat(pieceFolder).catch(() => null))?.isDirectory()) refuse("not_a_folder", { message: `${pieceFolder} isn't a folder.`, field: "folder", fix: "Give the folder of the piece you're publishing." });
+      return await publishPiece(pieceFolder, flags);
+    } catch (error) {
+      if (error instanceof PiecesError) throw new CommandError(error.error, EXIT_CODES.failed.exitCode);
+      throw error;
+    }
+  }
+  const marketplace = marketplaceReader();
   const folder = resolve(command === "pieces check" ? values.folder : (flags.folder ?? "."));
   if (!(await stat(folder).catch(() => null))?.isDirectory()) refuse("not_a_folder", { message: `${folder} isn't a folder.`, field: "folder", fix: command === "pieces check" ? "Give the folder of the piece you're making." : "Give the game's folder with --folder, or run it inside the folder." });
   const isDryRun = Boolean(flags["dry-run"]);
@@ -2531,10 +2747,10 @@ async function pieces(command, values, flags) {
   let answer;
   try {
     if (command === "pieces") answer = await listPieces(folder);
-    else if (command === "pieces add") answer = await addPiece(folder, values.source, { isDryRun });
-    else if (command === "pieces update") answer = await updatePiece(folder, values.name, { versionRange: flags.version ?? "*", source: flags.from ?? null, isDiscardingEdits, isDryRun });
+    else if (command === "pieces add") answer = await addPiece(folder, values.source, { isDryRun, marketplace });
+    else if (command === "pieces update") answer = await updatePiece(folder, values.name, { versionRange: flags.version ?? "*", source: flags.from ?? null, isDiscardingEdits, isDryRun, marketplace });
     else if (command === "pieces remove") answer = await removePiece(folder, values.name, { isDiscardingEdits, isDryRun });
-    else if (command === "pieces newer") answer = await newerPieces(folder);
+    else if (command === "pieces newer") answer = await newerPieces(folder, { marketplace });
     else answer = await checkPiece(folder, { isFixing: Boolean(flags.fix) });
   } catch (error) {
     if (error instanceof PiecesError) throw new CommandError(error.error, EXIT_CODES.failed.exitCode);
@@ -2547,7 +2763,7 @@ async function pieces(command, values, flags) {
   }
   const needLine = (need) => `${need.name} ${need.version_range}${need.kind === "piece" ? "" : ` (${need.kind})`}`;
   const sayPiece = (shown, firstWord) => {
-    console.log(`${firstWord}${shown.name} ${shown.piece_version}  ${shown.kind}, standard ${shown.standard}, ${shown.license}${shown.is_edited ? "  [its files were changed by hand]" : ""}`);
+    console.log(`${firstWord}${shown.name} ${shown.piece_version}  ${shown.kind}${shown.standard ? `, standard ${shown.standard}` : ""}, ${shown.license}${shown.is_edited ? "  [its files were changed by hand]" : ""}`);
     console.log(`    ${shown.summary}`);
     if (shown.needs.length) console.log(`    needs: ${shown.needs.map(needLine).join(", ")}`);
     if (shown.import_path) console.log(`    in the game:        import ... from "${shown.import_path}"`);

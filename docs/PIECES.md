@@ -1,23 +1,31 @@
 # Pieces
 
-A piece is a shared building block a game is made from: a body that already walks, input for every device, save and load, a sky, online play. A game adds the pieces it wants and spends its effort on what makes it its own. Every piece is optional, and no game is locked into any of them.
+A piece is a shared building block a game is made from or with: a body that already walks, input for every device, save and load, a sky, online play, a pack of footsteps, a skill for the AI that builds the game. A game adds the pieces it wants and spends its effort on what makes it its own. Every piece is optional, and no game is locked into any of them.
 
 Pieces are open. Anyone publishes one, for any engine or kind of game. Zaisma's own are added, updated and checked exactly as a stranger's are: nothing in the command knows any piece, standard or publisher by name. Zaisma's are MIT licensed, in [`pieces/`](../pieces).
 
-This page is the frame every piece stands on: what a piece states about itself, how it's added to a game, how its versions move, and how its settings and hooks are opened.
+This page is the frame every piece stands on: what a piece states about itself, how it's added to a game, how its versions move, how its settings and hooks are opened, and how one is published to [Zaisma's marketplace](#the-marketplace), where developers share and rate them.
 
-## The layers
+## The kinds
 
-| Kind | What it is |
-| --- | --- |
-| `foundation` | A standard everything else fits: a skeleton, a body, input, save and load, lighting, a networking core. |
-| `extension` | Plugs into one foundation: a kind of sync, a camera style, a way to move, an ability. |
-| `game_system` | A genre's part: a round timer, a combo counter, an inventory. |
-| `template` | A genre's systems wired together, with no style of their own. It's copied into a game once and is then the game's own. |
+A kind is how a piece arrives and what it may hold, never only a label.
+
+| Kind | What it is | How it arrives |
+| --- | --- | --- |
+| `foundation` | A standard everything else fits: a skeleton, a body, input, save and load, lighting, a networking core. | Added to a game, and moved by version. |
+| `extension` | Plugs into one foundation: a kind of sync, a camera style, a way to move, an ability. | Added to a game, and moved by version. |
+| `game_system` | A genre's part: a round timer, a combo counter, an inventory. | Added to a game, and moved by version. |
+| `template` | A genre's systems wired together, with no style of their own. | Copied into a game once, and then the game's own. |
+| `pack` | Images, models and sounds, as a folder in its maker's own structure. | Added to a game, and moved by version. |
+| `preset` | Values for another piece or a tool: a way to move, a look, a mix. | Added to a game, and moved by version. |
+| `skill` | Instructions for a developer's AI. Always under an open licence, text all through, and read in full before anyone gets it. | Fetched for the AI (`pieces get`); a game never holds one. |
+| `tool` | Something a developer runs on their own computer. Open or closed source, as its maker chooses. | Fetched to the developer's computer (`pieces get`); a game never holds one. |
+
+The first four are the layers a game's own code is built from: each is built on a standard, and all but a template open settings and hooks. What people call a module is an extension or a game system.
 
 ## Standards
 
-Every piece names the **standard** it's built on, so pieces made to fit one set of foundations are never mistaken for pieces made to fit another. A standard is whatever its keeper says it is: a set of foundations for three.js, a base for Godot, a skeleton alone.
+Every foundation, extension, game system and template names the **standard** it's built on, so pieces made to fit one set of foundations are never mistaken for pieces made to fit another. A pack, preset, skill or tool names one when it's made for one (a model pack rigged to a skeleton), and gives `null` when it fits anywhere. A standard is whatever its keeper says it is: a set of foundations for three.js, a base for Godot, a skeleton alone.
 
 A standard's name is a name on npm, like `@studio/standard`. Two makers' standards can never share a name, and whoever holds the name on npm keeps the standard. A piece built on someone else's standard names it the same way; a small standard can be one piece, named after itself. Zaisma's are in [Zaisma's pieces](#zaismas-pieces): one standard among any that people publish.
 
@@ -26,7 +34,7 @@ Adding a piece built on a standard the game didn't have says so, plainly. Nothin
 ## Adding pieces to a game
 
 ```
-npx @zaisma/cli pieces add @studio/dash-move          # by its name on npm, the newest version
+npx @zaisma/cli pieces add @studio/dash-move          # by its name, the newest version
 npx @zaisma/cli pieces add @studio/dash-move@^1.2     # or the newest within a range
 npx @zaisma/cli pieces add ./my-piece                 # a piece's folder
 npx @zaisma/cli pieces add ./my-piece-1.0.0.tgz       # or the .tgz that npm pack makes of it
@@ -35,6 +43,8 @@ npx @zaisma/cli pieces                                # what the game has
 ```
 
 Run them in the game's folder (the one with its `index.html`, or its source for a game that's built), or give `--folder`. Each takes `--json`.
+
+**Where a name is looked up.** With `ZAISMA_KEY` set, on [Zaisma's marketplace](#the-marketplace) first, then on npm; with no key, on npm alone. The game's record keeps where each piece came from (`source_kind`), and a later `pieces update` asks the same place. A skill or a tool is never added to a game: `pieces get` fetches it.
 
 A piece's files go in `pieces/<name>/` with its `piece.json`, its game server files (when it has any) in `zaisma-server/pieces/<name>/`, where a game server on Zaisma can import them and players are never served them, and the game's record of its pieces in `pieces/pieces.json`. Commit all three.
 
@@ -46,7 +56,7 @@ A piece's files go in `pieces/<name>/` with its `piece.json`, its game server fi
 - **A clash stops everything, plainly.** When the game has a version the new piece doesn't accept, nothing is added, and the error (`piece_version_clash`) says both versions and the two ways out: move the one in the game, or use a version of the new piece that accepts it. Two pieces being added that need versions of the same thing with no overlap stop the same way.
 - **A library isn't doubled either.** A piece may need a library that isn't a piece (three.js). A game that has it in its own `package.json` uses its own; one outside the accepted range is a clash like any other. A game without it gets the library's browser files in `pieces/<library>/`, and the command prints the import map its page needs.
 - **An engine is stated, never brought.** A piece for an engine that isn't a library on npm (Godot) says which versions it needs; the command says so and leaves the engine to the game.
-- **A piece's code is never run.** Adding copies the files a piece lists and nothing else: no install scripts, no links, no path outside the game's folder. A piece from npm is checked against npm's own hash of it first.
+- **A piece's code is never run.** Adding copies the files a piece lists and nothing else: no install scripts, no links, no path outside the game's folder. A piece from npm is checked against npm's own hash of it first, and one from Zaisma's marketplace file by file against the hashes its version lists.
 
 **Using one:** import it from where it was added, as the command prints:
 
@@ -67,7 +77,7 @@ Each piece's `index.d.ts` is its reference, with every call, setting, hook and e
 ## Moving a version
 
 ```
-npx @zaisma/cli pieces newer                              # what has a newer version on npm, and what holds it back
+npx @zaisma/cli pieces newer                              # what has a newer version where it came from, and what holds it back
 npx @zaisma/cli pieces update @studio/dash-move           # move one to the newest
 npx @zaisma/cli pieces update @studio/dash-move --version "^1.4"
 npx @zaisma/cli pieces update @studio/dash-move --from ./dash-move-1.5.0.tgz   # one that didn't come from npm
@@ -153,17 +163,17 @@ Every field is there every time, and an unknown one is refused, so a typo never 
 | `statement_version_number` | The format this file is written in: `1`. A command that meets a higher number says to run the newest command instead of guessing. |
 | `name` | The piece's name, as npm takes them. |
 | `piece_version` | Its version: three numbers, like `1.0.0`. Follow semver: a change that breaks games raises the first number. |
-| `kind` | `foundation`, `extension`, `game_system` or `template`. |
-| `standard` | The standard it's built on, by its name on npm ([Standards](#standards)). |
+| `kind` | `foundation`, `extension`, `game_system`, `template`, `pack`, `preset`, `skill` or `tool` ([The kinds](#the-kinds)). |
+| `standard` | The standard it's built on, by its name on npm ([Standards](#standards)); `null` only for a pack, preset, skill or tool built on none. |
 | `summary` | A sentence or two on what it gives a game, up to 400 characters. |
-| `license` | The licence it's under, as SPDX names it: `MIT`, `Apache-2.0`. |
-| `entry_path` | The file a game starts from (in JavaScript, the one it imports); `null` for a piece with only game server files. |
+| `license` | The licence it's under, as SPDX names it: `MIT`, `Apache-2.0`, `CC0-1.0`. A piece whose source is closed gives `UNLICENSED`, or `LicenseRef-<name>` for terms of its maker's own. A skill is always under an open one. |
+| `entry_path` | The file to start from: for a layer, the one a game imports (`null` with only game server files); for a skill, `SKILL.md`, the file an AI reads first; for a preset or a tool, its main file or `null`; for a pack, `null`. |
 | `server_entry_path` | The file a game server imports; `null` for a piece with no game server files. |
 | `file_paths` | Every file a game gets, each by its path inside the piece: forward slashes, nothing hidden (no part starting with a dot) and nothing in `node_modules`. The `piece.json` always comes too and isn't listed. A template's are copied into the game's own folder. |
 | `server_file_paths` | Every file a game server gets. A file both sides share is listed in both. Empty for a template, whose game server files are the game's own, under `zaisma-server/` in `file_paths`. |
 | `needs` | What it needs: each `{ name, version_range, kind }`. |
-| `settings` | Its settings: each `{ name, value_kind, default_value, minimum_number, maximum_number, maximum_character_count, choices, summary }`. Empty for a template. |
-| `hooks` | Its hooks: each `{ name, hook_kind, summary }`. Empty for a template. |
+| `settings` | Its settings: each `{ name, value_kind, default_value, minimum_number, maximum_number, maximum_character_count, choices, summary }`. Empty for anything but a foundation, an extension or a game system. |
+| `hooks` | Its hooks: each `{ name, hook_kind, summary }`. Empty the same way. |
 
 **A need** is `{ name, version_range, kind }`. `version_range` is a semver range like `^1.0.0`, `>=0.160.0 <1.0.0` or `1.x || 2.x`. `kind` says what it is:
 
@@ -204,7 +214,7 @@ What makes a piece good to build on:
 
 ```
 npx @zaisma/cli pieces check ./my-piece          # before publishing
-npx @zaisma/cli pieces check ./my-piece --fix    # and write piece.json.js again from piece.json
+npx @zaisma/cli pieces check ./my-piece --fix    # and write piece.json.js again from piece.json; for a pack, list its folder's files in file_paths
 ```
 
 The check reads the statement and the files it lists, and runs nothing. It ends with exit code 6 when the piece wouldn't add or would break in a game:
@@ -218,11 +228,94 @@ The check reads the statement and the files it lists, and runs nothing. It ends 
 | `package_disagrees` | refused | The package.json beside it has another name or version, or leaves a listed file out of what npm packs. |
 | `unlisted_import` | refused | A file imports a file of the piece's own that the piece.json doesn't list, so a game wouldn't get it. |
 | `undeclared_need` | refused | A file imports another piece or a library that isn't in needs. |
+| `forbidden_file` | refused | A file is a program for Windows, macOS or Linux, a shell script, an archive or a PDF, which Zaisma's marketplace takes in no piece, as in no game. |
+| `file_mislabeled` | refused | A pack's or preset's file isn't what its name says: its bytes are another kind of file. Zaisma's marketplace refuses it. |
+| `skill_file_not_text` | refused | A skill's file isn't text: a skill is read in full before anyone gets it. |
+| `contains_code` | note | A pack or preset holds a file that can run, can point at a script, or can't be seen through, so the marketplace marks it Contains code, never No code. |
 | `file_not_uploadable` | note | A file is of a type Zaisma's upload doesn't take, so a game whose folder is uploaded as it is can't hold the piece. |
 | `no_reference` | note | The file a game imports has no .d.ts beside it: it's what an AI reads to use the piece without opening its code. |
 | `no_readme` | note | There's no README.md among the piece's files. |
 
-Publish it with `npm publish`, its `package.json` giving the same name and version as its `piece.json` and packing every file it lists; anyone adds it by name. A piece that isn't on npm is added from its folder or its `.tgz`.
+Publish it to [Zaisma's marketplace](#the-marketplace) with `zaisma pieces publish`, to npm with `npm publish` (its `package.json` giving the same name and version as its `piece.json` and packing every file it lists), or both; anyone adds it by name. A piece that's on neither is added from its folder or its `.tgz`.
+
+## The marketplace
+
+Zaisma's marketplace (zaisma.com/marketplace) is where developers publish, share and rate pieces of every kind. It reads a piece's statement and never keeps a second one: what a listing says a piece is, is what its `piece.json` says. Zaisma's own pieces are listed and rated like anyone's.
+
+```
+npx @zaisma/cli pieces publish ./my-piece                       # its own check, its files, then Zaisma's checks
+npx @zaisma/cli pieces publish ./my-piece --visibility listed   # and put it in the marketplace's lists
+npx @zaisma/cli pieces search footsteps --kind pack             # find pieces, the best rated first
+npx @zaisma/cli pieces get @studio/level-notes                  # fetch a skill or a tool
+```
+
+Each needs `ZAISMA_KEY`. A developer's AI does the same through the MCP: `publish_piece`, `search_pieces`, `get_piece`, `read_piece_file` ([`docs/DEVELOPER-API.md`](DEVELOPER-API.md#the-developer-marketplace)).
+
+- **Private first.** A new piece is `private`: only its maker fetches it, which is all a studio sharing pieces between its own games needs. `unlisted` opens it to anyone who has its name; `listed` puts it in the marketplace's lists.
+- **A version never changes.** Raise `piece_version` for the next one. A game moves to it only when it chooses (`pieces update`).
+- **Names.** A scope (`@studio`) belongs to the first developer to publish under it on Zaisma; `@zaisma` is Zaisma's own.
+- **What a piece needs** shows on its listing from its own statement: each need with the versions it accepts, a link to its own listing, and the newest version there the range accepts. Zaisma says a piece fits a version only when it ran the two together; everything else says Not tested, never a guessed Fits.
+- **A test game.** A listing can link one of its maker's games that uses the piece, to try before using it.
+- **Pictures of its own.** A listing can carry a cover and a gallery its maker made (see A listing's pictures).
+- **Looking before getting.** A listing shows every picture, sound and 3D model inside the piece, to look at, hear and turn (see Looking before getting).
+- **Ratings.** A like or a dislike, one per developer, anonymous. Good pieces rise in the marketplace's order and poor ones sink.
+- **Copyright.** As everywhere on Zaisma, a piece stays up until it's reported: Zaisma doesn't guess whether something was copied (zaisma.com/legal/copyright).
+
+### A listing's pictures
+
+A piece's listing can show pictures its maker made: a **cover**, which the marketplace's lists show and the listing shows first, and up to 8 **gallery pictures**: the piece itself, an art pack's own cover art, or the piece in use in a game. Keep them in the piece's folder under `listing/`, and `pieces publish` makes the listing show exactly those:
+
+```
+my-pack/
+  piece.json
+  textures/oak.png …           the piece: what piece.json lists in file_paths
+  listing/
+    cover.png                  the cover (.png, .jpg, .jpeg or .webp)
+    gallery/
+      1-in-a-level.png         gallery pictures, in name order
+      2-close-up.jpg
+```
+
+- **They're the listing's, never the piece's.** No statement lists them (`pieces check --fix` leaves `listing/` out of a pack's `file_paths`), nothing that adds the piece to a game gets them, and they stay as versions change.
+- **What the folder doesn't say stays as it is.** No `listing/` folder changes nothing. No cover file leaves the cover; no `listing/gallery/` folder leaves the gallery. A gallery picture the folder no longer has is taken away.
+- **Sizes.** A PNG, JPEG or WebP, at least 1280 by 720 px (a cover landscape, 16:9 shows best; 2560 by 1440 shows sharp on the largest screens), up to 10 MB.
+- **Checked.** Each is matched against known abuse material before it's kept. A picture Zaisma doesn't take never fails the publish: the command says which and why, and `--json` answers `listing_pictures`, each `{ path, kind, picture_status, problem }` with `picture_status` `sent`, `kept`, `removed` or `refused`.
+
+A developer's AI does the same with `add_piece_image` and `remove_piece_image`.
+
+### Looking before getting
+
+A listing shows what's inside a piece's newest version, so a pack is judged by its own files and not by its cover alone:
+
+- **Pictures** (PNG, JPEG, WebP, GIF, AVIF, BMP, ICO, SVG) open whole in a viewer that steps through them.
+- **3D models** (glTF as `.glb`, `.gltf` or `.vrm`; OBJ; STL) turn in a viewer: drag to turn, scroll or pinch to zoom. It draws every mesh where its scene puts it, with its base colour, its base colour picture and its vertex colours. It doesn't run animation (a rigged model stands in its bind pose), and it says so when a model's shapes are packed with Draco or Meshopt, which it can't open. A `.gltf` reads its `.bin` and its pictures from beside it in the piece.
+- **Sounds** (Ogg, MP3, WAV, FLAC, M4A, AAC) play from their rows.
+- Every other file is named and nothing more: text, data, code, and formats no browser shows (FBX, PSD, TIFF, MIDI).
+
+Nothing a maker does turns this on: it's every such file of the newest version that passed its checks. The files come as they're stored from the game domain's own address for pieces, apart from zaisma.com and from every game, and that address answers only what can't run: never a script, a page or text, whatever a piece holds. A model's viewer is Zaisma's own page, framed from there, and runs nothing from the model. Anyone who can see a listing sees its previews; a private piece's open only for its maker, through an address its listing signs for an hour. Looking isn't getting: a key's say over fetching (below) holds bringing a piece's files into a project.
+
+### What Zaisma checks
+
+Every version passes Zaisma's fixed checks before anyone can fetch it, the same ones a game's version passes ([`docs/DEVELOPER-API.md`](DEVELOPER-API.md#the-fixed-checks-are-the-review)): no AI reads anything, and the same files always get the same answer. Then what its kind adds:
+
+- **Packs and presets: every file is opened.** An image can only be an image, and a sound only a sound: a file whose bytes aren't what its name says refuses the version (`file_mislabeled`). The version is then marked **No code**, a guarantee that it holds no scripts or code and nothing in it can run, or **Contains code**, when a file can run (a script, a shader, a page, a program), can point at a script already in the game (an engine's own scene or resource), or is one Zaisma can't see through (an archive, a format it doesn't know). `zaisma pieces check` opens the files the same way and says which it would be.
+- **Skills: text, in full.** A skill's files are all text, and its listing shows them whole, so it's read before anyone gets it. The version read is the version fetched, and a new version's listing shows what changed, line by line.
+- **No programs or archives, in any kind.** A piece's files pass the same file rule as a game's: no program for Windows, macOS or Linux, no shell script (a file starting `#!`), no archive and no PDF, whatever it's called. A tool is its source, a web page or a script run with its runtime, never a built program.
+- **Templates and layers** change the game they're added to, and are expected to: they run in the game's own sandbox like the rest of its code.
+
+A finding that refuses a version comes with its fix: `file_mislabeled`, `skill_file_not_text`, or one of the fixed checks' own codes (`crypto_miner`, `disguised_code` and the rest). `needs_review` and `scan_failed` hold a version for a person at Zaisma.
+
+### Fetching, and what an AI may fetch
+
+A piece from another developer is a stranger's files, and a skill is a stranger's instructions to an AI. So every key and connected AI app says whether what holds it may fetch other developers' pieces, chosen when it's made (zaisma.com/dashboard/settings):
+
+| Choice | What it does |
+| --- | --- |
+| Ask me first (`ask`, the default) | It fetches only the pieces you said yes to. A first try stops with `piece_approval_needed` and the piece's listing, where you read what it is and say yes or no. |
+| Download freely (`free`) | It fetches any piece it can see. |
+| Can't download (`none`) | It never fetches another developer's piece, or reads its files. |
+
+Your own pieces never ask. Reading a listing and a statement is always open, and so is looking at its pictures, sounds and models there; the setting holds fetching the piece's files, code and all, into a project. It governs what comes through Zaisma: a piece that's also on npm can be had from npm.
 
 ## Errors
 
@@ -235,6 +328,10 @@ The command's errors, each with a `fix`:
 | `bad_piece_source` | What was given isn't a piece's folder, its `.tgz` or a name on npm, or its archive can't be trusted. |
 | `piece_not_found` | There's no such piece or version where it was looked for. |
 | `piece_source_unreachable` | npm couldn't be reached, so nothing was changed. |
+| `piece_not_addable` | `pieces add`: the piece is a skill or a tool, which a game never holds: `pieces get` fetches it. |
+| `piece_folder_not_empty` | `pieces get`: the folder already holds files that aren't a copy of the piece. |
+| `piece_not_ready` | `pieces publish`: the piece's own check found something that refuses it, so nothing was sent. |
+| `piece_file_changed` | A file fetched from Zaisma's marketplace isn't the one its version lists, so nothing was changed. |
 | `piece_already_added` | `pieces add`: the game already has this piece at another version; a piece moves to another version only with `pieces update`. |
 | `piece_not_added` | `pieces update`, `pieces remove`: the game has no such piece. |
 | `piece_version_clash` | Two pieces need versions of the same thing that don't overlap, so nothing was changed; the error says both versions and the ways out. |

@@ -14,296 +14,23 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { parse as parseJavaScript } from "acorn";
 import { GAME_FILE_EXTENSIONS, extensionOf } from "./check.mjs";
+import {
+  HOOK_FIELDS, HOOK_KINDS, NEED_FIELDS, NEED_KINDS, PIECE_KINDS, PIECE_LIMITS, PIECES_FOLDER, PiecesError, RECORD_PATH, RECORD_VERSION_NUMBER, SERVER_PIECES_FOLDER, SETTING_FIELDS, SETTING_VALUE_KINDS,
+  SOURCE_KINDS, STATEMENT_FIELDS, STATEMENT_MODULE_PATH, STATEMENT_PATH, STATEMENT_VERSION_NUMBER, camelName, compareVersions, newestSatisfying, parseRange, parseVersion, readStatement, satisfies,
+  FETCHED_KINDS, LAYER_KINDS, NAME_PATTERN, NEWEST_COMMAND, SKILL_ENTRY_PATH, isOpenLicense, isPlainObject, isSafePath, refuse, statementModuleText,
+} from "./piece-statement.mjs";
+import { CONTENT_HEAD_SIZE_BYTES, contentsKindOf, fileContentsOf, isText, neededHeadSizeBytes, refusedFileOf } from "./piece-contents.mjs";
 
-/** The format of a piece.json this command reads. A statement with a higher number is from a newer command. */
-export const STATEMENT_VERSION_NUMBER = 1;
-/** The format of a game's pieces/pieces.json this command reads and writes. */
-export const RECORD_VERSION_NUMBER = 1;
-/** The kinds of piece, from the standards everything fits to the thing copied once. */
-export const PIECE_KINDS = ["foundation", "extension", "game_system", "template"];
-/** What a piece can need: another piece, a library from npm that isn't a piece, or an engine the game must already be on. */
-export const NEED_KINDS = ["piece", "library", "engine"];
-/** The kinds of value a setting holds. */
-export const SETTING_VALUE_KINDS = ["number", "integer", "boolean", "choice", "text", "color"];
-/** The kinds of hook: the piece tells the game something happened, or asks it before something does. */
-export const HOOK_KINDS = ["event", "decision"];
-/** Where a piece can come from. */
-export const SOURCE_KINDS = ["folder", "tarball", "npm"];
-/** A piece's statement, at the top of its folder. */
-export const STATEMENT_PATH = "piece.json";
-/** The statement as a module, for a piece's own code to read: always exactly what statementModuleText makes of piece.json. */
-export const STATEMENT_MODULE_PATH = "piece.json.js";
-/** The game's record of its pieces, in its pieces folder. */
-export const RECORD_PATH = "pieces/pieces.json";
-/** Where pieces go in a game, and where their game server files go: a game server on Zaisma imports only from its own folder. */
-export const PIECES_FOLDER = "pieces";
-export const SERVER_PIECES_FOLDER = "zaisma-server/pieces";
-/** What a piece may hold and state; past these it's refused. */
-export const PIECE_LIMITS = {
-  maximumFileCount: 5000,
-  maximumArchiveSizeBytes: 200_000_000,
-  maximumUnpackedSizeBytes: 500_000_000,
-  maximumStatementSizeBytes: 500_000,
-  maximumNeedCount: 50,
-  maximumSettingCount: 200,
-  maximumHookCount: 200,
-  maximumSummaryCharacterCount: 400,
-  maximumChoiceCount: 50,
-  maximumTextCharacterCount: 10_000,
+export {
+  HOOK_FIELDS, HOOK_KINDS, NEED_FIELDS, NEED_KINDS, PIECE_KINDS, PIECE_LIMITS, PIECES_FOLDER, PiecesError, RECORD_PATH, RECORD_VERSION_NUMBER, SERVER_PIECES_FOLDER, SETTING_FIELDS, SETTING_VALUE_KINDS,
+  SOURCE_KINDS, STATEMENT_FIELDS, STATEMENT_MODULE_PATH, STATEMENT_PATH, STATEMENT_VERSION_NUMBER, camelName, compareVersions, newestSatisfying, parseRange, parseVersion, readStatement, satisfies,
+  FETCHED_KINDS, LAYER_KINDS, SKILL_ENTRY_PATH, isOpenLicense, statementModuleText,
 };
 
-/** Every field of a piece.json, of one of its needs, settings and hooks: each is there every time, and nothing else is. */
-export const STATEMENT_FIELDS = ["statement_version_number", "name", "piece_version", "kind", "standard", "summary", "license", "entry_path", "server_entry_path", "file_paths", "server_file_paths", "needs", "settings", "hooks"];
-export const NEED_FIELDS = ["name", "version_range", "kind"];
-export const SETTING_FIELDS = ["name", "value_kind", "default_value", "minimum_number", "maximum_number", "maximum_character_count", "choices", "summary"];
-export const HOOK_FIELDS = ["name", "hook_kind", "summary"];
-const NAME_PATTERN = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
-const MAXIMUM_NAME_CHARACTER_COUNT = 100;
-const STATED_NAME_PATTERN = /^[a-z][a-z0-9]*(_[a-z0-9]+)*$/;
-const MAXIMUM_STATED_NAME_CHARACTER_COUNT = 64;
-const CHOICE_PATTERN = /^[a-z0-9]+([_-][a-z0-9]+)*$/;
-const COLOR_PATTERN = /^#[0-9a-f]{6}$/;
-const LICENSE_PATTERN = /^[A-Za-z0-9.+()-]+( [A-Za-z0-9.+()-]+)*$/;
-const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z.-]+)?$/;
 const FETCH_TIMEOUT_MS = 30000;
-const NEWEST_COMMAND = "npx @zaisma/cli@latest";
-
-/** A failure in the API's error shape (docs/NAMING.md, Errors). */
-export class PiecesError extends Error {
-  constructor(code, { message, field = null, fix }) {
-    super(message);
-    this.error = { code, message, field, fix, retry_after_sec: null };
-  }
-}
-const refuse = (code, details) => {
-  throw new PiecesError(code, details);
-};
-
-// ---- Versions and ranges (semver) ----
-
-/** A version like "1.4.2" or "2.0.0-beta.1" in its parts, or null when it isn't one. */
-export function parseVersion(text) {
-  const match = VERSION_PATTERN.exec(String(text).trim());
-  return match ? { majorNumber: Number(match[1]), minorNumber: Number(match[2]), patchNumber: Number(match[3]), prerelease: match[4] ? match[4].slice(1) : null } : null;
-}
-
-/** Semver's order for two pre-release tags: numbers by size, words by letters, a number before a word, the shorter first. */
-function comparePrereleases(first, second) {
-  const [firstParts, secondParts] = [first.split("."), second.split(".")];
-  for (let i = 0; i < Math.max(firstParts.length, secondParts.length); i++) {
-    if (firstParts[i] === undefined) return -1;
-    if (secondParts[i] === undefined) return 1;
-    const [isFirstNumber, isSecondNumber] = [/^\d+$/.test(firstParts[i]), /^\d+$/.test(secondParts[i])];
-    if (isFirstNumber && isSecondNumber && Number(firstParts[i]) !== Number(secondParts[i])) return Number(firstParts[i]) - Number(secondParts[i]);
-    if (isFirstNumber !== isSecondNumber) return isFirstNumber ? -1 : 1;
-    if (!isFirstNumber && firstParts[i] !== secondParts[i]) return firstParts[i] < secondParts[i] ? -1 : 1;
-  }
-  return 0;
-}
-
-/** Negative when first is older than second, positive when newer, 0 when the same. */
-export function compareVersions(first, second) {
-  const [firstVersion, secondVersion] = [parseVersion(first), parseVersion(second)];
-  for (const part of ["majorNumber", "minorNumber", "patchNumber"]) if (firstVersion[part] !== secondVersion[part]) return firstVersion[part] - secondVersion[part];
-  if (firstVersion.prerelease === secondVersion.prerelease) return 0;
-  if (firstVersion.prerelease === null) return 1;
-  if (secondVersion.prerelease === null) return -1;
-  return comparePrereleases(firstVersion.prerelease, secondVersion.prerelease);
-}
-
-/** One comparator like ">=1.2.0", "^1.2.0", "~1.2", "1.x" or "*" as the versions it lets through: [{ operator, version }], all of which must hold. */
-function comparatorBounds(text) {
-  const match = /^(\^|~|>=|<=|>|<|=)?\s*v?(\*|x|X|\d+)(?:\.(\*|x|X|\d+))?(?:\.(\*|x|X|\d+))?(-[0-9A-Za-z.-]+)?$/.exec(text);
-  if (!match) return null;
-  const [, operator = "", majorText, minorText, patchText, prerelease = ""] = match;
-  const isWild = (part) => part === undefined || part === "*" || part === "x" || part === "X";
-  if (isWild(majorText)) return [];
-  const majorNumber = Number(majorText);
-  const minorNumber = isWild(minorText) ? null : Number(minorText);
-  const patchNumber = isWild(patchText) ? null : Number(patchText);
-  const floor = `${majorNumber}.${minorNumber ?? 0}.${patchNumber ?? 0}${prerelease}`;
-  const nextMajor = `${majorNumber + 1}.0.0`;
-  const nextMinor = `${majorNumber}.${(minorNumber ?? 0) + 1}.0`;
-  if (operator === "^") {
-    // ^ keeps the leftmost number that isn't zero.
-    const ceiling = majorNumber > 0 || minorNumber === null ? nextMajor : minorNumber > 0 || patchNumber === null ? nextMinor : `${majorNumber}.${minorNumber}.${patchNumber + 1}`;
-    return [{ operator: ">=", version: floor }, { operator: "<", version: ceiling }];
-  }
-  if (operator === "~") return [{ operator: ">=", version: floor }, { operator: "<", version: minorNumber === null ? nextMajor : nextMinor }];
-  if (operator === "" || operator === "=") {
-    if (minorNumber === null) return [{ operator: ">=", version: floor }, { operator: "<", version: nextMajor }];
-    if (patchNumber === null) return [{ operator: ">=", version: floor }, { operator: "<", version: nextMinor }];
-    return [{ operator: "=", version: floor }];
-  }
-  // A bare ">1" means past every 1.x, and "<=1" means up to the last 1.x.
-  if (operator === ">" && patchNumber === null) return [{ operator: ">=", version: minorNumber === null ? nextMajor : nextMinor }];
-  if (operator === "<=" && patchNumber === null) return [{ operator: "<", version: minorNumber === null ? nextMajor : nextMinor }];
-  return [{ operator, version: floor }];
-}
-
-/** A range like "^1.0.0", ">=0.160.0 <1.0.0" or "1.x || 2.x" as its alternatives, each a list of bounds; null when it isn't a range. */
-export function parseRange(rangeText) {
-  if (typeof rangeText !== "string" || !rangeText.trim() || rangeText.length > 200) return null;
-  const alternatives = [];
-  for (const alternative of rangeText.split("||")) {
-    const bounds = [];
-    for (const word of alternative.trim().replace(/(>=|<=|>|<|=|\^|~)\s+/g, "$1").split(/\s+/).filter(Boolean)) {
-      const parsed = comparatorBounds(word);
-      if (!parsed) return null;
-      bounds.push(...parsed);
-    }
-    alternatives.push(bounds);
-  }
-  return alternatives;
-}
-
-/** Whether a version is one a range accepts. A pre-release version is accepted only by a range that names it exactly. */
-export function satisfies(version, rangeText) {
-  const alternatives = parseRange(rangeText);
-  if (!alternatives || !parseVersion(version)) return false;
-  const isPrerelease = parseVersion(version).prerelease !== null;
-  return alternatives.some((bounds) => {
-    if (isPrerelease && !bounds.some((bound) => bound.version === version)) return false;
-    return bounds.every(({ operator, version: bound }) => {
-      const isNewer = compareVersions(version, bound) > 0;
-      const isSame = compareVersions(version, bound) === 0;
-      return operator === ">=" ? isNewer || isSame : operator === "<=" ? !isNewer : operator === ">" ? isNewer : operator === "<" ? !isNewer && !isSame : isSame;
-    });
-  });
-}
-
-/** The newest of some versions that every one of the ranges accepts, or null. */
-export function newestSatisfying(versions, ranges) {
-  const everyRange = Array.isArray(ranges) ? ranges : [ranges];
-  return versions.filter((version) => everyRange.every((rangeText) => satisfies(version, rangeText))).sort(compareVersions).pop() ?? null;
-}
-
-// ---- A piece's statement (piece.json) ----
-
-/**
- * A path inside a piece: forward slashes, no "..", never absolute. No part is hidden (".git", ".github") or
- * node_modules either: a template's files land in the game's own folder, where those run without being asked.
- */
-function isSafePath(path) {
-  return typeof path === "string" && path.length > 0 && path.length <= 200 && !path.startsWith("/") && !/^[A-Za-z]:/.test(path) && !path.includes("\\") && !/[\0-\x1f]/.test(path) && !path.split("/").some((part) => part === "" || part.startsWith(".") || part === "node_modules");
-}
-
-/** A stated name in a JavaScript piece's own style: jump_height_m is jumpHeightM. */
-export function camelName(statedName) {
-  return statedName.replace(/_([a-z0-9])/g, (whole, letter) => letter.toUpperCase());
-}
-
-const isPlainObject = (given) => given !== null && typeof given === "object" && !Array.isArray(given);
-
-/**
- * A piece.json, checked: every field there and of its shape, nothing unknown (docs/PIECES.md, "What a piece
- * states"). Throws bad_piece_statement naming the field at fault, or piece_statement_newer for a statement
- * written for a newer command than this one.
- */
-export function readStatement(statementText, whereFrom = STATEMENT_PATH) {
-  const bad = (field, message, fix) => refuse("bad_piece_statement", { message: `${whereFrom}: ${message}`, field, fix });
-  let statement;
-  try {
-    statement = JSON.parse(statementText);
-  } catch {
-    statement = null;
-  }
-  if (!isPlainObject(statement)) bad(null, "it isn't a JSON object.", `A piece.json is an object with ${STATEMENT_FIELDS.join(", ")} (docs/PIECES.md).`);
-  const formatNumber = statement.statement_version_number;
-  if (!Number.isInteger(formatNumber) || formatNumber < 1) bad("statement_version_number", "its statement_version_number isn't a whole number from 1.", `Give ${STATEMENT_VERSION_NUMBER}: the format this piece.json is written in.`);
-  if (formatNumber > STATEMENT_VERSION_NUMBER) {
-    refuse("piece_statement_newer", { message: `${whereFrom} is written in format ${formatNumber}, and this command reads up to ${STATEMENT_VERSION_NUMBER}.`, field: "statement_version_number", fix: `Run the newest command: ${NEWEST_COMMAND} pieces.` });
-  }
-  for (const field of Object.keys(statement)) if (!STATEMENT_FIELDS.includes(field)) bad(field, `it has an unknown field "${field}".`, `A piece.json holds only: ${STATEMENT_FIELDS.join(", ")}.`);
-  for (const field of STATEMENT_FIELDS) if (!(field in statement)) bad(field, `it has no ${field}.`, `Give every field: ${STATEMENT_FIELDS.join(", ")}.`);
-  const isName = (name) => typeof name === "string" && NAME_PATTERN.test(name) && name.length <= MAXIMUM_NAME_CHARACTER_COUNT;
-  if (!isName(statement.name)) bad("name", `its name "${statement.name}" isn't a piece's name.`, 'Give a name as npm takes them, like "@studio/dash-move".');
-  if (!parseVersion(statement.piece_version)) bad("piece_version", `its piece_version "${statement.piece_version}" isn't a version.`, 'Give three numbers, like "1.0.0".');
-  if (!PIECE_KINDS.includes(statement.kind)) bad("kind", `its kind "${statement.kind}" isn't a kind of piece.`, `Use one of: ${PIECE_KINDS.join(", ")}.`);
-  if (!isName(statement.standard)) bad("standard", `its standard "${statement.standard}" isn't a standard's name.`, 'Name the standard the piece is built on, as its keeper holds it on npm, like "@studio/standard".');
-  const isSummary = (summary) => typeof summary === "string" && summary.trim().length > 0 && summary.length <= PIECE_LIMITS.maximumSummaryCharacterCount;
-  if (!isSummary(statement.summary)) bad("summary", `its summary is missing or over ${PIECE_LIMITS.maximumSummaryCharacterCount} characters.`, "Say in a sentence or two what the piece gives a game.");
-  if (typeof statement.license !== "string" || !LICENSE_PATTERN.test(statement.license) || statement.license.length > 100) bad("license", `its license "${statement.license}" isn't a licence's name.`, 'Name the licence the piece is under, as SPDX does, like "MIT" or "Apache-2.0".');
-  for (const field of ["file_paths", "server_file_paths"]) {
-    const paths = statement[field];
-    if (!Array.isArray(paths) || !paths.every(isSafePath) || new Set(paths).size !== paths.length) bad(field, `its ${field} isn't a list of the piece's own files.`, 'List each file once by its path inside the piece, like "index.js" or "sounds/step.ogg".');
-    if (paths.includes(STATEMENT_PATH)) bad(field, `its ${field} lists ${STATEMENT_PATH}.`, `Take it out: a piece's ${STATEMENT_PATH} always comes with it.`);
-  }
-  if (statement.file_paths.length + statement.server_file_paths.length > PIECE_LIMITS.maximumFileCount) bad("file_paths", `it lists more than ${PIECE_LIMITS.maximumFileCount} files.`, "Split the piece, or pack small files together.");
-  if (!statement.file_paths.length && !statement.server_file_paths.length) bad("file_paths", "it lists no files.", "List the piece's files in file_paths, and its game server files in server_file_paths.");
-  for (const [entryField, pathsField] of [["entry_path", "file_paths"], ["server_entry_path", "server_file_paths"]]) {
-    const [entryPath, paths] = [statement[entryField], statement[pathsField]];
-    if (!paths.length && entryPath !== null) bad(entryField, `its ${entryField} names a file, and its ${pathsField} is empty.`, `Give null, or list the file in ${pathsField}.`);
-    if (paths.length && !paths.includes(entryPath)) bad(entryField, `its ${entryField} isn't one of its ${pathsField}.`, `Name the file ${entryField === "entry_path" ? "a game" : "a game server"} starts from, one of ${pathsField}.`);
-  }
-  if (statement.kind === "template") {
-    // A template's files become the game's own, its game server's among them, so there's nothing to open or keep apart.
-    if (statement.server_file_paths.length) bad("server_file_paths", "it's a template with server_file_paths.", "A template's files are copied into the game's own folder: list them all in file_paths, its game server's under zaisma-server/.");
-    if (statement.file_paths.some((path) => path === RECORD_PATH || path.startsWith(`${PIECES_FOLDER}/`) || path.startsWith(`${SERVER_PIECES_FOLDER}/`))) bad("file_paths", `it's a template that writes into ${PIECES_FOLDER}/.`, `Pieces a template uses go in its needs; ${PIECES_FOLDER}/ and ${SERVER_PIECES_FOLDER}/ hold only what the command adds.`);
-    if (!Array.isArray(statement.settings) || !Array.isArray(statement.hooks) || statement.settings.length || statement.hooks.length) bad("settings", "it's a template with settings or hooks.", "Give empty lists: a template is copied once and is then the game's own to change.");
-  }
-  if (!Array.isArray(statement.needs) || statement.needs.length > PIECE_LIMITS.maximumNeedCount) bad("needs", `its needs isn't a list of at most ${PIECE_LIMITS.maximumNeedCount}.`, "Give a list, empty when the piece needs nothing.");
-  for (const need of statement.needs) {
-    if (!isPlainObject(need)) bad("needs", "one of its needs isn't an object.", `Each need is { ${NEED_FIELDS.join(", ")} }.`);
-    for (const field of Object.keys(need)) if (!NEED_FIELDS.includes(field)) bad("needs", `a need has an unknown field "${field}".`, `A need holds only: ${NEED_FIELDS.join(", ")}.`);
-    if (!isName(need.name)) bad("needs", `a need's name "${need.name}" isn't a name.`, "Name the piece or library needed as npm names it, or the engine in lowercase.");
-    if (!parseRange(need.version_range)) bad("needs", `the need for ${need.name} has a version_range "${need.version_range}" that isn't a range.`, 'Give the versions accepted, like "^1.0.0" or ">=0.160.0 <1.0.0".');
-    if (!NEED_KINDS.includes(need.kind)) bad("needs", `the need for ${need.name} has kind "${need.kind}".`, `Use one of: ${NEED_KINDS.join(", ")}.`);
-  }
-  if (new Set(statement.needs.map((need) => need.name)).size !== statement.needs.length) bad("needs", "it needs the same thing twice.", "List each need once.");
-  if (statement.needs.some((need) => need.name === statement.name)) bad("needs", "it needs itself.", "Take the piece's own name out of its needs.");
-  if (!Array.isArray(statement.settings) || statement.settings.length > PIECE_LIMITS.maximumSettingCount) bad("settings", `its settings isn't a list of at most ${PIECE_LIMITS.maximumSettingCount}.`, "Give a list, empty when the piece has no settings.");
-  const isStatedName = (name) => typeof name === "string" && STATED_NAME_PATTERN.test(name) && name.length <= MAXIMUM_STATED_NAME_CHARACTER_COUNT;
-  for (const setting of statement.settings) {
-    if (!isPlainObject(setting)) bad("settings", "one of its settings isn't an object.", `Each setting is { ${SETTING_FIELDS.join(", ")} }.`);
-    const badSetting = (message, fix) => bad("settings", `the setting ${setting.name}: ${message}`, fix);
-    for (const field of Object.keys(setting)) if (!SETTING_FIELDS.includes(field)) bad("settings", `a setting has an unknown field "${field}".`, `A setting holds only: ${SETTING_FIELDS.join(", ")}.`);
-    for (const field of SETTING_FIELDS) if (!(field in setting)) bad("settings", `a setting has no ${field}.`, `Give every field, null where it doesn't apply: ${SETTING_FIELDS.join(", ")}.`);
-    if (!isStatedName(setting.name)) bad("settings", `a setting's name "${setting.name}" isn't a name.`, 'Name it in lowercase with underscores, saying what it holds and its unit, like "jump_height_m" (docs/NAMING.md).');
-    if (!SETTING_VALUE_KINDS.includes(setting.value_kind)) badSetting(`its value_kind "${setting.value_kind}" isn't a kind of value.`, `Use one of: ${SETTING_VALUE_KINDS.join(", ")}.`);
-    if (!isSummary(setting.summary)) badSetting(`its summary is missing or over ${PIECE_LIMITS.maximumSummaryCharacterCount} characters.`, "Say in a sentence what the setting changes.");
-    const isNumeric = setting.value_kind === "number" || setting.value_kind === "integer";
-    const isNumber = (given) => typeof given === "number" && Number.isFinite(given) && (setting.value_kind !== "integer" || Number.isInteger(given));
-    if (isNumeric) {
-      if (![setting.default_value, setting.minimum_number, setting.maximum_number].every(isNumber)) badSetting(`its default_value, minimum_number and maximum_number aren't all ${setting.value_kind === "integer" ? "whole numbers" : "numbers"}.`, "Give all three: every number has a range.");
-      if (setting.minimum_number > setting.default_value || setting.default_value > setting.maximum_number) badSetting("its default_value isn't between its minimum_number and maximum_number.", "Give a default within the range.");
-    } else if (setting.minimum_number !== null || setting.maximum_number !== null) badSetting(`it's a ${setting.value_kind} with a minimum_number or maximum_number.`, "Give null for both: only a number or an integer has a range.");
-    if (setting.value_kind === "boolean" && typeof setting.default_value !== "boolean") badSetting("its default_value isn't true or false.", "Give true or false.");
-    if (setting.value_kind === "color" && (typeof setting.default_value !== "string" || !COLOR_PATTERN.test(setting.default_value))) badSetting("its default_value isn't a colour.", 'Give six hex digits in lowercase, like "#3fa9f5".');
-    if (setting.value_kind === "choice") {
-      const choices = setting.choices;
-      if (!Array.isArray(choices) || choices.length < 2 || choices.length > PIECE_LIMITS.maximumChoiceCount || !choices.every((choice) => typeof choice === "string" && CHOICE_PATTERN.test(choice) && choice.length <= MAXIMUM_STATED_NAME_CHARACTER_COUNT) || new Set(choices).size !== choices.length) badSetting(`its choices isn't a list of 2 to ${PIECE_LIMITS.maximumChoiceCount} different lowercase words.`, 'List each choice once, like ["low", "medium", "high"].');
-      if (!choices.includes(setting.default_value)) badSetting("its default_value isn't one of its choices.", "Give one of the choices.");
-    } else if (setting.choices !== null) badSetting(`it's a ${setting.value_kind} with choices.`, "Give null: only a choice has choices.");
-    if (setting.value_kind === "text") {
-      if (!Number.isInteger(setting.maximum_character_count) || setting.maximum_character_count < 1 || setting.maximum_character_count > PIECE_LIMITS.maximumTextCharacterCount) badSetting(`its maximum_character_count isn't a whole number from 1 to ${PIECE_LIMITS.maximumTextCharacterCount}.`, "Say how long the text may be.");
-      if (typeof setting.default_value !== "string" || setting.default_value.length > setting.maximum_character_count) badSetting("its default_value isn't text within its maximum_character_count.", "Give text that fits.");
-    } else if (setting.maximum_character_count !== null) badSetting(`it's a ${setting.value_kind} with a maximum_character_count.`, "Give null: only text has a length.");
-  }
-  for (const [field, entries] of [["settings", statement.settings], ["hooks", statement.hooks]]) {
-    if (!Array.isArray(entries)) continue;
-    // Two names that read the same in a JavaScript piece (jump_2x and jump2x) would be one there.
-    const names = entries.map((entry) => (isPlainObject(entry) && typeof entry.name === "string" ? camelName(entry.name) : entry));
-    if (new Set(names).size !== names.length) bad(field, `it has two ${field} of the same name.`, `Name each of its ${field} once.`);
-  }
-  if (!Array.isArray(statement.hooks) || statement.hooks.length > PIECE_LIMITS.maximumHookCount) bad("hooks", `its hooks isn't a list of at most ${PIECE_LIMITS.maximumHookCount}.`, "Give a list, empty when the piece has no hooks.");
-  for (const hook of statement.hooks) {
-    if (!isPlainObject(hook)) bad("hooks", "one of its hooks isn't an object.", `Each hook is { ${HOOK_FIELDS.join(", ")} }.`);
-    for (const field of Object.keys(hook)) if (!HOOK_FIELDS.includes(field)) bad("hooks", `a hook has an unknown field "${field}".`, `A hook holds only: ${HOOK_FIELDS.join(", ")}.`);
-    if (!isStatedName(hook.name)) bad("hooks", `a hook's name "${hook.name}" isn't a name.`, 'Name it in lowercase with underscores, like "before_jump" or "landed".');
-    if (!HOOK_KINDS.includes(hook.hook_kind)) bad("hooks", `the hook ${hook.name} has hook_kind "${hook.hook_kind}".`, `Use one of: ${HOOK_KINDS.join(", ")}.`);
-    if (!isSummary(hook.summary)) bad("hooks", `the hook ${hook.name} has a summary that's missing or over ${PIECE_LIMITS.maximumSummaryCharacterCount} characters.`, "Say in a sentence when it's called and what the game can do there.");
-  }
-  return statement;
-}
 
 /** Whether a piece.json.js is its piece.json as a module, whatever line endings a checkout gave it. */
 const isStatementModule = (moduleBytes, statementText) => moduleBytes.toString("utf8").replace(/\r\n/g, "\n") === statementModuleText(statementText);
-
-/** piece.json as a module (piece.json.js), so a piece's own code reads the one statement and never a second copy of it. */
-export function statementModuleText(statementText) {
-  return `// This piece's statement, piece.json, as a module for its own code to read. "zaisma pieces check --fix" writes it: never edit it.\nexport default ${JSON.stringify(JSON.parse(statementText), null, 2)};\n`;
-}
 
 // ---- What adding a piece brings ----
 
@@ -588,6 +315,24 @@ function npmReader() {
   return { versionsOf, archiveOf };
 }
 
+/**
+ * Where a piece is looked up by its name: Zaisma's marketplace first, when the command was given a way to ask it
+ * (it needs the developer's key, so a key's say over fetching holds), then npm. A library that isn't a piece is
+ * npm's alone. marketplace is { versionsOf(name), archiveOf(name, ranges) }, as npmReader's, or null.
+ */
+function sourcesReader(marketplace = null) {
+  const npm = npmReader();
+  const archiveOf = async (name, ranges) => {
+    const listed = marketplace ? await marketplace.archiveOf(name, ranges) : null;
+    if (listed) return { ...listed, sourceKind: "marketplace" };
+    const published = await npm.archiveOf(name, ranges);
+    return published ? { ...published, sourceKind: "npm" } : null;
+  };
+  /** The versions a unit's own source has of it: { version: … }, or null when it can't be asked. */
+  const versionsOf = (name, sourceKind) => (sourceKind === "npm" ? npm.versionsOf(name) : sourceKind === "marketplace" && marketplace ? marketplace.versionsOf(name) : null);
+  return { npm, archiveOf, versionsOf, hasMarketplace: marketplace !== null };
+}
+
 /** The file of a package that a browser imports, by its package.json. */
 function browserEntryOf(packageJson) {
   const dotExport = packageJson.exports?.["."] ?? packageJson.exports;
@@ -645,7 +390,7 @@ async function readInstalledLibrary(name, ranges, fromFolder) {
 }
 
 /** What a source names: a folder, a .tgz file, or a name on npm with an optional range ("@studio/dash-move@^1.2"). Answers the piece as a unit. */
-export async function readSource(source, { baseFolder = process.cwd(), npm = npmReader() } = {}) {
+export async function readSource(source, { baseFolder = process.cwd(), sources = sourcesReader() } = {}) {
   const path = isAbsolute(source) ? source : resolve(baseFolder, source);
   const found = await stat(path).catch(() => null);
   if (found?.isDirectory()) return readPieceFolder(path);
@@ -653,13 +398,14 @@ export async function readSource(source, { baseFolder = process.cwd(), npm = npm
   const match = /^((?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*)(?:@(.+))?$/.exec(source);
   if (!match || source.startsWith(".") || source.includes("//") || source.includes("\\")) refuse("piece_not_found", { message: `There's no folder or file at ${source}, and it isn't a name on npm.`, field: "source", fix: "Give a piece's folder, its .tgz, or its name on npm, like @studio/dash-move." });
   if (match[2] !== undefined && !parseRange(match[2])) refuse("bad_piece_source", { message: `"${match[2]}" isn't a version or a range.`, field: "source", fix: "Give a name alone for the newest, or with a range, like @studio/dash-move@^1.2." });
-  const archive = await npm.archiveOf(match[1], [match[2] ?? "*"]);
-  if (!archive) refuse("piece_not_found", { message: `npm has no ${match[1]}${match[2] ? ` at ${match[2]}` : ""}.`, field: "source", fix: "Check the name and the version. A piece that isn't on npm is added from its folder or its .tgz." });
-  return pieceFrom(archive.allFiles, "npm", `${match[1]}@${archive.version}`, archive.whereFrom);
+  const archive = await sources.archiveOf(match[1], [match[2] ?? "*"]);
+  if (!archive) refuse("piece_not_found", { message: `${sources.hasMarketplace ? "Neither Zaisma's marketplace nor npm has" : "npm has no"} ${match[1]}${match[2] ? ` at ${match[2]}` : ""}.`, field: "source", fix: `Check the name and the version. ${sources.hasMarketplace ? "" : "Zaisma's marketplace is asked too once ZAISMA_KEY is set. "}A piece that's on neither is added from its folder or its .tgz.` });
+  return pieceFrom(archive.allFiles, archive.sourceKind, `${match[1]}@${archive.version}`, archive.whereFrom);
 }
 
-/** Looks a piece's needs up where the piece itself came from: beside its folder, else on npm. */
-function needFinder(piece, npm) {
+/** Looks a piece's needs up where the piece itself came from: beside its folder, else on Zaisma's marketplace and npm. */
+function needFinder(piece, sources) {
+  const { npm } = sources;
   return async (name, needKind, ranges) => {
     const isFolder = piece.sourceKind === "folder";
     if (needKind === "library") {
@@ -680,8 +426,8 @@ function needFinder(piece, npm) {
         }
       }
     }
-    const archive = await npm.archiveOf(name, ranges);
-    return archive ? pieceFrom(archive.allFiles, "npm", `${name}@${archive.version}`, archive.whereFrom) : null;
+    const archive = await sources.archiveOf(name, ranges);
+    return archive ? pieceFrom(archive.allFiles, archive.sourceKind, `${name}@${archive.version}`, archive.whereFrom) : null;
   };
 }
 
@@ -832,7 +578,7 @@ export function importMapOf(record) {
 }
 
 /** The standards a game's pieces are built on. */
-const standardsOf = (record) => [...new Set(record.pieces.map((entry) => entry.statement.standard))].sort();
+const standardsOf = (record) => [...new Set(record.pieces.map((entry) => entry.statement.standard).filter((standard) => standard !== null))].sort();
 
 /** One piece as the command answers it: its statement, and where a game imports it from. */
 function shownPiece(entry, isPieceEdited) {
@@ -896,11 +642,12 @@ async function carryOut(gameFolder, record, added, isDryRun) {
  * zaisma pieces add: adds a piece and what it needs, or changes nothing. With isDryRun it answers what adding
  * would do and writes nothing.
  */
-export async function addPiece(gameFolder, source, { isDryRun = false } = {}) {
-  const npm = npmReader();
-  const piece = await readSource(source, { npm });
+export async function addPiece(gameFolder, source, { isDryRun = false, marketplace = null } = {}) {
+  const sources = sourcesReader(marketplace);
+  const piece = await readSource(source, { sources });
+  if (FETCHED_KINDS.includes(piece.kind)) refuse("piece_not_addable", { message: `${piece.name} is a ${piece.kind}: it's for you or your AI, and a game never holds one.`, field: "source", fix: `Fetch it instead: zaisma pieces get ${piece.name}.` });
   const record = await readRecord(gameFolder);
-  const find = needFinder(piece, npm);
+  const find = needFinder(piece, sources);
   const libraries = gameLibrariesReader(gameFolder);
   await libraries.note(piece);
   const plan = await planAdd({
@@ -918,6 +665,48 @@ export async function addPiece(gameFolder, source, { isDryRun = false } = {}) {
   return { is_dry_run: isDryRun, added_pieces: shown.pieces, added_libraries: shown.libraries, kept_names: plan.keptNames, engine_needs: plan.engineNeeds, standards: standardsOf(record), new_standards: newStandards, import_map: importMapOf(record) };
 }
 
+/**
+ * zaisma pieces get: a piece's files, written to a folder of their own: how a skill reaches the developer's AI and a
+ * tool the developer's computer, since a game holds neither. A copy of the same piece already there is replaced,
+ * and the answer says what changed since it; any other folder with files in it is left alone. Nothing is run.
+ */
+export async function getPiece(source, toFolder, { isDryRun = false, marketplace = null } = {}) {
+  return writePieceCopy(await readPiece(source, { marketplace }), toFolder, { isDryRun });
+}
+
+/** A piece read from its source, a folder, a .tgz or a name, with its files: what writePieceCopy writes. */
+export const readPiece = (source, { marketplace = null } = {}) => readSource(source, { sources: sourcesReader(marketplace) });
+
+/** Writes a read piece's files into a folder of their own, as getPiece says. */
+export async function writePieceCopy(piece, toFolder, { isDryRun = false } = {}) {
+  const earlierText = await readFile(join(toFolder, STATEMENT_PATH), "utf8").catch(() => null);
+  let earlier = null;
+  try {
+    earlier = earlierText === null ? null : JSON.parse(earlierText);
+  } catch {
+    earlier = null;
+  }
+  const existing = await readdir(toFolder).catch(() => []);
+  if (existing.length && earlier?.name !== piece.name) refuse("piece_folder_not_empty", { message: `${toFolder} already holds files that aren't a copy of ${piece.name}.`, field: "to", fix: "Give an empty folder with --to, or move those files away first." });
+  const paths = [STATEMENT_PATH, ...piece.statement.file_paths];
+  const earlierPaths = earlier && Array.isArray(earlier.file_paths) ? [STATEMENT_PATH, ...earlier.file_paths.filter(isSafePath)] : [];
+  const changes = { added_paths: [], changed_paths: [], removed_paths: earlierPaths.filter((path) => !paths.includes(path)) };
+  for (const path of paths) {
+    const had = earlierPaths.includes(path) ? await readFile(join(toFolder, ...path.split("/"))).catch(() => null) : null;
+    if (had === null) changes.added_paths.push(path);
+    else if (!had.equals(Buffer.from(piece.files[path]))) changes.changed_paths.push(path);
+  }
+  if (!isDryRun) {
+    for (const path of changes.removed_paths) await rm(join(toFolder, ...path.split("/")), { force: true });
+    for (const path of paths) {
+      const target = join(toFolder, ...path.split("/"));
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, piece.files[path]);
+    }
+  }
+  return { is_dry_run: isDryRun, name: piece.name, piece_version: piece.version, kind: piece.kind, source_kind: piece.sourceKind, folder: toFolder, earlier_piece_version: typeof earlier?.piece_version === "string" ? earlier.piece_version : null, ...(earlier ? changes : { added_paths: paths, changed_paths: [], removed_paths: [] }) };
+}
+
 const noSuchPiece = (name) => refuse("piece_not_added", { message: `The game has no piece or library ${name} in its ${PIECES_FOLDER} folder.`, field: "name", fix: `zaisma pieces lists what it has; zaisma pieces add ${name} adds it. A library in the game's own package.json is the game's to move.` });
 const refuseEdited = (name, command) => refuse("piece_edited", { message: `${name}'s files in the game aren't the ones that were added: someone changed them.`, field: "name", fix: `Nothing was changed. A piece is changed through its settings and hooks, never its files; if a change is missing, tell its maker. To lose the edits anyway: zaisma pieces ${command} ${name} --discard-edits.` });
 
@@ -926,21 +715,22 @@ const refuseEdited = (name, command) => refuse("piece_edited", { message: `${nam
  * developer's word, when everything else in the game accepts it. Nothing else moves; what the new version needs
  * and the game lacks is brought.
  */
-export async function updatePiece(gameFolder, name, { versionRange = "*", source = null, isDiscardingEdits = false, isDryRun = false } = {}) {
+export async function updatePiece(gameFolder, name, { versionRange = "*", source = null, isDiscardingEdits = false, isDryRun = false, marketplace = null } = {}) {
   const record = await readRecord(gameFolder);
   const had = hadOf(record);
   const current = had[name];
   if (!current) noSuchPiece(name);
   if (current.kind === "template") refuse("piece_not_updatable", { message: `${name} is a template: it was copied once and is the game's own now.`, field: "name", fix: "Nothing to update. Take what you want from a newer template by hand." });
   if (!parseRange(versionRange)) refuse("bad_piece_source", { message: `"${versionRange}" isn't a version or a range.`, field: "version", fix: 'Give a version or a range, like "^1.2" or "1.4.0".' });
-  const npm = npmReader();
+  const sources = sourcesReader(marketplace);
+  const { npm } = sources;
   let next;
   if (source !== null && current.kind === "library") refuse("bad_piece_source", { message: `${name} is a library, which comes from npm.`, field: "from", fix: "Leave --from out, and give --version for the version you want." });
-  if (source !== null) next = await readSource(source, { npm });
+  if (source !== null) next = await readSource(source, { sources });
   else if (current.kind === "library") {
     const archive = await npm.archiveOf(name, [versionRange]);
     next = archive ? await libraryFrom(async (path) => archive.allFiles[path] ?? null, name, "npm") : null;
-  } else if (current.sourceKind === "npm") next = await readSource(`${name}@${versionRange}`, { npm });
+  } else if (current.sourceKind === "npm" || current.sourceKind === "marketplace") next = await readSource(`${name}@${versionRange}`, { sources });
   else refuse("piece_source_needed", { message: `${name} was added from a ${current.sourceKind}, so there's nowhere to look for another version.`, field: "from", fix: `Say where the new version is: zaisma pieces update ${name} --from <folder or .tgz>.` });
   if (!next) refuse("piece_not_found", { message: `npm has no ${name} at ${versionRange}.`, field: "version", fix: "Check the version." });
   if (next.name !== name) refuse("bad_piece_source", { message: `That's ${next.name}, not ${name}.`, field: "from", fix: `Give a source of ${name}.` });
@@ -971,7 +761,7 @@ export async function updatePiece(gameFolder, name, { versionRange = "*", source
   const others = Object.fromEntries(Object.entries(had).filter(([hadName]) => hadName !== name));
   const libraries = gameLibrariesReader(gameFolder);
   await libraries.note(next);
-  const find = needFinder(next, npm);
+  const find = needFinder(next, sources);
   const plan = await planAdd({
     piece: next,
     had: others,
@@ -1019,14 +809,14 @@ export async function removePiece(gameFolder, name, { isDiscardingEdits = false,
  * zaisma pieces newer: which of a game's pieces have a newer version on npm, and the newest the rest of the
  * game accepts. It changes nothing: a version moves only with pieces update.
  */
-export async function newerPieces(gameFolder) {
+export async function newerPieces(gameFolder, { marketplace = null } = {}) {
   const record = await readRecord(gameFolder);
   const had = hadOf(record);
-  const npm = npmReader();
+  const sources = sourcesReader(marketplace);
   const newer = { newer_pieces: [], newer_libraries: [], unchecked_names: [] };
   for (const unit of Object.values(had)) {
     if (unit.kind === "template") continue;
-    const versions = unit.sourceKind === "npm" ? await npm.versionsOf(unit.name) : null;
+    const versions = await sources.versionsOf(unit.name, unit.sourceKind);
     if (!versions) {
       newer.unchecked_names.push(unit.name);
       continue;
@@ -1045,6 +835,48 @@ export async function newerPieces(gameFolder) {
 
 // ---- A maker's check of a piece, before publishing it ----
 
+/** Every file under a folder, by its path from it, sorted: nothing hidden, nothing in node_modules, no links. */
+async function folderFilePaths(folder, inside = "") {
+  const paths = [];
+  for (const entry of await readdir(join(folder, ...inside.split("/").filter(Boolean)), { withFileTypes: true })) {
+    if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+    const path = inside ? `${inside}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) paths.push(...(await folderFilePaths(folder, path)));
+    else if (entry.isFile()) paths.push(path);
+  }
+  return paths.sort();
+}
+
+/**
+ * The folder in a piece's folder that holds its listing's own pictures (docs/PIECES.md, "A listing's pictures"): its
+ * cover and its gallery on the marketplace. They're the listing's, never the piece's: no statement lists them, and
+ * nothing that adds the piece gets them.
+ */
+export const LISTING_FOLDER = "listing";
+const LISTING_PICTURE_PATTERN = /\.(png|jpe?g|webp)$/i;
+
+/**
+ * A piece's listing pictures as its folder keeps them: its cover (listing/cover.png, .jpg, .jpeg or .webp) and its
+ * gallery (every picture in listing/gallery/, in name order), each with its bytes. cover is null when there's no cover
+ * file, gallery is null when there's no gallery folder: what the folder doesn't say is left as the listing has it.
+ * Null when the piece has no listing folder at all.
+ */
+export async function readListingPictures(pieceFolder) {
+  const paths = (await folderFilePaths(pieceFolder).catch(() => [])).filter((path) => path.startsWith(`${LISTING_FOLDER}/`) && LISTING_PICTURE_PATTERN.test(path));
+  const hasGalleryFolder = await readdir(join(pieceFolder, LISTING_FOLDER, "gallery")).then(() => true, () => false);
+  const hasListingFolder = await readdir(join(pieceFolder, LISTING_FOLDER)).then(() => true, () => false);
+  if (!hasListingFolder) return null;
+  const read = async (path) => ({ path, bytes: new Uint8Array(await readFile(join(pieceFolder, ...path.split("/")))) });
+  const coverPath = paths.find((path) => /^listing\/cover\.[a-z]+$/i.test(path));
+  return { cover: coverPath ? await read(coverPath) : null, gallery: hasGalleryFolder ? await Promise.all(paths.filter((path) => path.startsWith(`${LISTING_FOLDER}/gallery/`)).map(read)) : null };
+}
+
+/** A piece's folder as the marketplace takes it: its statement, and every file it lists with its bytes. For zaisma pieces publish. */
+export async function readPieceForPublishing(pieceFolder) {
+  const piece = await readPieceFolder(pieceFolder);
+  return { statement: piece.statement, files: piece.files };
+}
+
 /** Every problem the check finds. refused: adding the piece would fail or break it in a game. note: worth fixing, and it still adds. */
 export const PIECE_CHECK_CODES = {
   bad_piece_statement: { problemKind: "refused", meaning: "The piece.json isn't one: the message names the field." },
@@ -1054,6 +886,10 @@ export const PIECE_CHECK_CODES = {
   package_disagrees: { problemKind: "refused", meaning: "The package.json beside it has another name or version, or leaves a listed file out of what npm packs." },
   unlisted_import: { problemKind: "refused", meaning: "A file imports a file of the piece's own that the piece.json doesn't list, so a game wouldn't get it." },
   undeclared_need: { problemKind: "refused", meaning: "A file imports another piece or a library that isn't in needs." },
+  forbidden_file: { problemKind: "refused", meaning: "A file is a program for Windows, macOS or Linux, a shell script, an archive or a PDF, which Zaisma's marketplace takes in no piece, as in no game." },
+  file_mislabeled: { problemKind: "refused", meaning: "A pack's or preset's file isn't what its name says: its bytes are another kind of file. Zaisma's marketplace refuses it." },
+  skill_file_not_text: { problemKind: "refused", meaning: "A skill's file isn't text: a skill is read in full before anyone gets it." },
+  contains_code: { problemKind: "note", meaning: "A pack or preset holds a file that can run, can point at a script, or can't be seen through, so the marketplace marks it Contains code, never No code." },
   file_not_uploadable: { problemKind: "note", meaning: "A file is of a type Zaisma's upload doesn't take, so a game whose folder is uploaded as it is can't hold the piece." },
   no_reference: { problemKind: "note", meaning: "The file a game imports has no .d.ts beside it: it's what an AI reads to use the piece without opening its code." },
   no_readme: { problemKind: "note", meaning: "There's no README.md among the piece's files." },
@@ -1090,11 +926,29 @@ function importedModules(text) {
  */
 export async function checkPiece(pieceFolder, { isFixing = false } = {}) {
   const problems = [];
+  let contentsKind = null;
   const add = (code, message, path, fix) => problems.push({ code, problem_kind: PIECE_CHECK_CODES[code].problemKind, message, path, fix });
-  const done = (statement) => ({ name: statement?.name ?? null, piece_version: statement?.piece_version ?? null, is_ready: !problems.some((problem) => problem.problem_kind === "refused"), problems });
+  const done = (statement) => ({ name: statement?.name ?? null, piece_version: statement?.piece_version ?? null, kind: statement?.kind ?? null, contents_kind: contentsKind, is_ready: !problems.some((problem) => problem.problem_kind === "refused"), problems });
   const statementBytes = await readFile(join(pieceFolder, STATEMENT_PATH)).catch(() => null);
   if (!statementBytes) refuse("bad_piece_source", { message: `${pieceFolder} has no ${STATEMENT_PATH}, so it isn't a piece.`, field: "folder", fix: `Give a piece's folder: one with a ${STATEMENT_PATH} at its top (docs/PIECES.md).` });
-  const statementText = statementBytes.toString("utf8");
+  let statementText = statementBytes.toString("utf8");
+  // A pack is a folder in its maker's own structure: --fix lists its files, so nobody types hundreds of paths.
+  if (isFixing) {
+    let given = null;
+    try {
+      given = JSON.parse(statementText);
+    } catch {
+      given = null;
+    }
+    if (given?.kind === "pack") {
+      // The listing's own pictures (listing/) are never part of the piece.
+      const filePaths = (await folderFilePaths(pieceFolder)).filter((path) => path !== STATEMENT_PATH && path !== "package.json" && !path.startsWith(`${LISTING_FOLDER}/`));
+      if (JSON.stringify(given.file_paths) !== JSON.stringify(filePaths)) {
+        statementText = JSON.stringify({ ...given, file_paths: filePaths }, null, 2) + "\n";
+        await writeFile(join(pieceFolder, STATEMENT_PATH), statementText);
+      }
+    }
+  }
   let statement;
   try {
     statement = readStatement(statementText);
@@ -1122,11 +976,29 @@ export async function checkPiece(pieceFolder, { isFixing = false } = {}) {
       for (const path of [STATEMENT_PATH, ...listedPaths]) if (!isPacked(path)) add("package_disagrees", `package.json's files leaves out ${path}, so npm wouldn't publish it.`, "package.json", `Add "${path}" to package.json's files.`);
     }
   }
+  // No piece holds a program, a shell script or an archive, whatever it's called: Zaisma's storage refuses them, as in a game.
+  for (const [path, bytes] of Object.entries(files)) {
+    const refused = refusedFileOf(bytes.subarray(0, 16));
+    if (refused) add("forbidden_file", `${path} is ${refused}, which Zaisma takes in no piece, whatever it's called.`, path, refused === "a shell script" ? "Take its first line (#!…) out and say in the README how to run it, or leave the file out." : "Leave it out: publish the files themselves, never an archive or a built program.");
+  }
+  // What its kind adds. A pack or a preset: every file opened, as the marketplace opens it. A skill: text all through.
+  if (statement.kind === "pack" || statement.kind === "preset") {
+    const opened = Object.entries(files).map(([path, bytes]) => ({ path, ...fileContentsOf(path, bytes.subarray(0, neededHeadSizeBytes(path))) }));
+    for (const file of opened.filter((each) => each.is_mislabeled)) add("file_mislabeled", `${file.path}: ${file.reason}`, file.path, "Give the file the extension of what it is, or leave it out.");
+    contentsKind = contentsKindOf(opened);
+    const runnable = opened.filter((each) => each.contents_kind === "contains_code" && !each.is_mislabeled);
+    if (runnable.length) add("contains_code", `${runnable.length === 1 ? "One file makes" : `${runnable.length} files make`} this ${statement.kind} Contains code, so it can't be marked No code: ${runnable.slice(0, 5).map((each) => each.path).join(", ")}${runnable.length > 5 ? "…" : ""}. ${runnable[0].reason}`, runnable[0].path, "Fine if it's meant: the marketplace says so on its listing. For No code, leave those files out or publish them as another piece.");
+  }
+  if (statement.kind === "skill") {
+    for (const [path, bytes] of Object.entries(files)) if (bytes.length && !isText(bytes.subarray(0, CONTENT_HEAD_SIZE_BYTES))) add("skill_file_not_text", `${path} isn't text.`, path, "Keep a skill to text files, and publish anything else as a pack or a tool the skill names.");
+  }
   // What each file imports: its own files must be listed, and anything outside the piece must be one of its needs.
   const needKinds = Object.fromEntries(statement.needs.map((need) => [need.name, need.kind]));
   const isTemplate = statement.kind === "template";
+  const isLayer = LAYER_KINDS.includes(statement.kind);
   for (const [path, bytes] of Object.entries(files)) {
-    if (!/\.m?js$/.test(path)) continue;
+    // Only what a game runs is held to its needs: a tool's or a skill's scripts import what they like.
+    if (!isLayer || !/\.m?js$/.test(path)) continue;
     const modules = importedModules(bytes.toString("utf8"));
     for (const module of modules ?? []) {
       const sides = [statement.file_paths.includes(path) ? statement.file_paths : null, statement.server_file_paths.includes(path) ? statement.server_file_paths : null].filter(Boolean);
@@ -1152,11 +1024,12 @@ export async function checkPiece(pieceFolder, { isFixing = false } = {}) {
     }
   }
   for (const path of listedPaths) {
-    if (path.endsWith(".d.ts") || GAME_FILE_EXTENSIONS.includes(extensionOf(path))) continue;
+    // A skill and a tool never go into a game's folder, so what a game's upload takes doesn't hold them.
+    if (FETCHED_KINDS.includes(statement.kind) || path.endsWith(".d.ts") || GAME_FILE_EXTENSIONS.includes(extensionOf(path))) continue;
     add("file_not_uploadable", `${path} is of a type Zaisma's upload doesn't take.`, path, "A game whose folder is uploaded as it is can't hold this file. Rename it (a licence travels as LICENSE.txt), or leave it out if the game never reads it.");
   }
   const entryPath = statement.entry_path;
-  if (!isTemplate && entryPath && /\.m?js$/.test(entryPath) && !statement.file_paths.includes(entryPath.replace(/\.m?js$/, ".d.ts"))) add("no_reference", `${entryPath} has no ${entryPath.replace(/\.m?js$/, ".d.ts")} among the piece's files.`, entryPath, "Write one with every call, setting, hook and error explained and an example: it's what an AI reads instead of the code.");
+  if (isLayer && !isTemplate && entryPath && /\.m?js$/.test(entryPath) && !statement.file_paths.includes(entryPath.replace(/\.m?js$/, ".d.ts"))) add("no_reference", `${entryPath} has no ${entryPath.replace(/\.m?js$/, ".d.ts")} among the piece's files.`, entryPath, "Write one with every call, setting, hook and error explained and an example: it's what an AI reads instead of the code.");
   if (!statement.file_paths.includes("README.md")) add("no_readme", "There's no README.md in file_paths.", null, "Add one that shows the piece in use.");
   return done(statement);
 }

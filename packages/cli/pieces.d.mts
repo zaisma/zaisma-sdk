@@ -1,40 +1,6 @@
-/** A piece's piece.json, read and checked (docs/PIECES.md, "What a piece states"). */
-export interface PieceStatement {
-  statement_version_number: number;
-  name: string;
-  piece_version: string;
-  kind: "foundation" | "extension" | "game_system" | "template";
-  standard: string;
-  summary: string;
-  license: string;
-  entry_path: string | null;
-  server_entry_path: string | null;
-  file_paths: string[];
-  server_file_paths: string[];
-  needs: PieceNeed[];
-  settings: StatedSetting[];
-  hooks: StatedHook[];
-}
-export interface PieceNeed {
-  name: string;
-  version_range: string;
-  kind: "piece" | "library" | "engine";
-}
-export interface StatedSetting {
-  name: string;
-  value_kind: "number" | "integer" | "boolean" | "choice" | "text" | "color";
-  default_value: number | boolean | string;
-  minimum_number: number | null;
-  maximum_number: number | null;
-  maximum_character_count: number | null;
-  choices: string[] | null;
-  summary: string;
-}
-export interface StatedHook {
-  name: string;
-  hook_kind: "event" | "decision";
-  summary: string;
-}
+import type { PieceNeed, PieceStatement, SourceKind, StatedHook, StatedSetting } from "./piece-statement.mjs";
+export * from "./piece-statement.mjs";
+
 /** A library a game's pieces brought, as its record keeps it. */
 export interface RecordedLibrary {
   name: string;
@@ -46,7 +12,6 @@ export interface RecordedLibrary {
   source_kind: SourceKind;
   files_sha256: string;
 }
-export type SourceKind = "folder" | "tarball" | "npm";
 /** A game's pieces/pieces.json. */
 export interface PiecesRecord {
   about: string;
@@ -70,7 +35,7 @@ export interface ShownPiece {
   name: string;
   piece_version: string;
   kind: PieceStatement["kind"];
-  standard: string;
+  standard: string | null;
   summary: string;
   license: string;
   source_kind: SourceKind;
@@ -143,42 +108,15 @@ export interface PieceCheckProblem {
 export interface PieceCheckAnswer {
   name: string | null;
   piece_version: string | null;
+  kind: PieceStatement["kind"] | null;
+  /** A pack's or preset's mark, from opening every file as the marketplace does; null for other kinds. */
+  contents_kind: "files_only" | "contains_code" | null;
   is_ready: boolean;
   problems: PieceCheckProblem[];
 }
 
-export declare const STATEMENT_VERSION_NUMBER: number;
-export declare const RECORD_VERSION_NUMBER: number;
-export declare const STATEMENT_FIELDS: string[];
-export declare const NEED_FIELDS: string[];
-export declare const SETTING_FIELDS: string[];
-export declare const HOOK_FIELDS: string[];
-export declare const PIECE_KINDS: PieceStatement["kind"][];
-export declare const NEED_KINDS: PieceNeed["kind"][];
-export declare const SETTING_VALUE_KINDS: StatedSetting["value_kind"][];
-export declare const HOOK_KINDS: StatedHook["hook_kind"][];
-export declare const SOURCE_KINDS: SourceKind[];
-export declare const STATEMENT_PATH: string;
-export declare const STATEMENT_MODULE_PATH: string;
-export declare const RECORD_PATH: string;
-export declare const PIECES_FOLDER: string;
-export declare const SERVER_PIECES_FOLDER: string;
-export declare const PIECE_LIMITS: Record<string, number>;
 export declare const PIECE_CHECK_CODES: Record<string, { problemKind: "refused" | "note"; meaning: string }>;
 
-/** A failure in the API's error shape. */
-export declare class PiecesError extends Error {
-  error: { code: string; message: string; field: string | null; fix: string; retry_after_sec: null };
-}
-
-export declare function parseVersion(text: string): { majorNumber: number; minorNumber: number; patchNumber: number; prerelease: string | null } | null;
-export declare function compareVersions(first: string, second: string): number;
-export declare function parseRange(rangeText: string): { operator: string; version: string }[][] | null;
-export declare function satisfies(version: string, rangeText: string): boolean;
-export declare function newestSatisfying(versions: string[], ranges: string | string[]): string | null;
-export declare function camelName(statedName: string): string;
-export declare function readStatement(statementText: string, whereFrom?: string): PieceStatement;
-export declare function statementModuleText(statementText: string): string;
 export declare function planAdd(plan: {
   piece: Unit;
   had?: Record<string, Unit>;
@@ -190,12 +128,48 @@ export declare function checkUpdateFits(update: { name: string; nextVersion: str
 export declare function filesHash(files: Record<string, Uint8Array>): string;
 export declare function readTar(bytes: Uint8Array): Record<string, Buffer>;
 export declare function readSource(source: string, where?: { baseFolder?: string }): Promise<Unit>;
+/**
+ * Zaisma's marketplace, as a way to look a piece up by name: versionsOf answers { version: … } or null when it has no
+ * such piece, archiveOf the files of the newest version every range accepts. The command makes one from the developer's key.
+ */
+export interface MarketplaceReader {
+  versionsOf(name: string): Promise<Record<string, unknown> | null>;
+  archiveOf(name: string, ranges: string[]): Promise<{ version: string; allFiles: Record<string, Uint8Array>; whereFrom: string } | null>;
+}
+/** What fetching a piece into a folder of its own did. */
+export interface FetchedCopy {
+  is_dry_run: boolean;
+  name: string;
+  piece_version: string;
+  kind: PieceStatement["kind"];
+  source_kind: SourceKind;
+  folder: string;
+  /** The version of the same piece that was there before; null when the folder was empty. */
+  earlier_piece_version: string | null;
+  added_paths: string[];
+  changed_paths: string[];
+  removed_paths: string[];
+}
+export declare function readPiece(source: string, options?: { marketplace?: MarketplaceReader | null }): Promise<Unit>;
+export declare function writePieceCopy(piece: Unit, toFolder: string, options?: { isDryRun?: boolean }): Promise<FetchedCopy>;
+export declare function getPiece(source: string, toFolder: string, options?: { isDryRun?: boolean; marketplace?: MarketplaceReader | null }): Promise<FetchedCopy>;
+/** The folder in a piece's folder that holds its listing's own pictures: never part of the piece. */
+export declare const LISTING_FOLDER: string;
+/** One of a listing's pictures from its folder. */
+export interface ListingPictureFile {
+  /** Its path in the piece's folder: "listing/cover.png". */
+  path: string;
+  bytes: Uint8Array;
+}
+/** A piece's listing pictures as its folder keeps them; null with no listing folder. cover null: no cover file. gallery null: no listing/gallery folder. */
+export declare function readListingPictures(pieceFolder: string): Promise<{ cover: ListingPictureFile | null; gallery: ListingPictureFile[] | null } | null>;
+export declare function readPieceForPublishing(pieceFolder: string): Promise<{ statement: PieceStatement; files: Record<string, Uint8Array> }>;
 export declare function readRecord(gameFolder: string): Promise<PiecesRecord>;
 export declare function placesOf(unit: Unit): { path: string; filePath: string; hashKey: string }[];
 export declare function importMapOf(record: PiecesRecord): ImportMap;
 export declare function listPieces(gameFolder: string): Promise<PiecesList>;
-export declare function addPiece(gameFolder: string, source: string, options?: { isDryRun?: boolean }): Promise<Brought>;
-export declare function updatePiece(gameFolder: string, name: string, options?: { versionRange?: string; source?: string | null; isDiscardingEdits?: boolean; isDryRun?: boolean }): Promise<UpdateAnswer>;
+export declare function addPiece(gameFolder: string, source: string, options?: { isDryRun?: boolean; marketplace?: MarketplaceReader | null }): Promise<Brought>;
+export declare function updatePiece(gameFolder: string, name: string, options?: { versionRange?: string; source?: string | null; isDiscardingEdits?: boolean; isDryRun?: boolean; marketplace?: MarketplaceReader | null }): Promise<UpdateAnswer>;
 export declare function removePiece(gameFolder: string, name: string, options?: { isDiscardingEdits?: boolean; isDryRun?: boolean }): Promise<RemoveAnswer>;
-export declare function newerPieces(gameFolder: string): Promise<NewerAnswer>;
+export declare function newerPieces(gameFolder: string, options?: { marketplace?: MarketplaceReader | null }): Promise<NewerAnswer>;
 export declare function checkPiece(pieceFolder: string, options?: { isFixing?: boolean }): Promise<PieceCheckAnswer>;

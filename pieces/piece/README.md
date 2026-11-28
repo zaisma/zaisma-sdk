@@ -43,6 +43,21 @@ export function createJumper(given = {}) {
 - A hook is an **event** (`tell`: the piece says what happened) or a **decision** (`ask`: the piece proposes, and what the game answers is what happens; check the answer before using it).
 - If a game would have to edit the piece to change something, the piece is missing a setting or a hook.
 
+## What a piece keeps
+
+A piece with something of the player's to bring back next time (the controls they rebound, the sensitivity they chose) opens it with `openKept` and puts it on itself as `kept`. Any save keeps it beside the game's progress and gives it back when the game opens ([`@zaisma/save`](../save)'s `keptPieces`).
+
+```js
+const { kept, changed } = openKept(statement, settings, {
+  settingNames: ["mouseLookRadPerPx"], // the player's own choices, never what the game tunes
+  readState: () => ({ skinName }),
+  restoreState: (keptState) => { skinName = keptState?.skinName ?? "plain"; }, // null: back to how it was made
+});
+return { settings, hooks, kept, setSkin(name) { skinName = name; changed(); } };
+```
+
+A kept setting is kept only once it differs from what it was when the piece was made. Raise `keptFormatVersionNumber` when the shape of the state changes: `restoreState` gets the number it was kept with, and a save keeps a newer version's record as it is.
+
 ## In a game
 
 Every piece made this way is changed the same way:

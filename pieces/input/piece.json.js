@@ -2,7 +2,7 @@
 export default {
   "statement_version_number": 1,
   "name": "@zaisma/input",
-  "piece_version": "1.0.0",
+  "piece_version": "1.1.0",
   "kind": "foundation",
   "standard": "@zaisma/standard",
   "summary": "Input for every device: keyboard and mouse, touch and gamepads read as one set of actions the game names, plus where the player moves and how far they turn the view, so a game plays on a phone, a laptop and a controller with no handling of its own for each.",
@@ -20,7 +20,7 @@ export default {
   "needs": [
     {
       "name": "@zaisma/piece",
-      "version_range": "^1.0.0",
+      "version_range": "^1.1.0",
       "kind": "piece"
     }
   ],

@@ -187,6 +187,8 @@ export function openHooks(statement, givenHooks = {}) {
   };
   return {
     hooks,
+    /** Whether the game handles a hook: for a piece that does something of its own when nobody listens. */
+    hasHandlers: (name) => handlersByName.get(name)?.length > 0,
     tell(name, ...details) {
       for (const handler of ownHook(name, "event", "tell")) callSafely(pieceName, `a handler of the hook ${name}`, handler, details);
     },
@@ -210,14 +212,101 @@ export function openPiece(statement, given = {}) {
   const pieceName = checkedStatement(statement).name;
   if (!isPlainObject(given)) throw new PieceError(pieceName, "bad_setting", { message: `${pieceName} is made with an object.`, field: null, fix: "Give an object, like { settings: { … }, hooks: { … } }." });
   const settings = openSettings(statement, given.settings ?? {});
-  const { hooks, tell, ask } = openHooks(statement, given.hooks ?? {});
+  const { hooks, hasHandlers, tell, ask } = openHooks(statement, given.hooks ?? {});
   return {
     settings,
     hooks,
+    hasHandlers,
     tell,
     ask,
     refuse(code, { message, field = null, fix }) {
       throw new PieceError(pieceName, code, { message, field, fix });
     },
   };
+}
+
+const KEPT_OPTIONS = ["keptFormatVersionNumber", "settingNames", "readState", "restoreState"];
+
+/**
+ * Opens what a piece keeps of its own between plays, for any save to keep: some of its settings (the player's own
+ * choices, like how fast the mouse turns the view) and state of its own (the controls the player chose), as plain
+ * data. Answers { kept, changed }: put kept on the piece as piece.kept, where a save finds it; call changed() after
+ * the piece's own state changes, so the save writes it. A setting is kept once it differs from what it was when the
+ * piece was made, so a game that changes its own default later still reaches players who never changed it.
+ */
+export function openKept(statement, settings, options = {}) {
+  const pieceName = checkedStatement(statement).name;
+  const refuse = (code, message, field, fix) => {
+    throw new PieceError(pieceName, code, { message, field, fix });
+  };
+  if (!isPlainObject(options)) refuse("bad_kept", "openKept takes an object of options.", null, `Give { ${KEPT_OPTIONS.join(", ")} }.`);
+  for (const name of Object.keys(options)) if (!KEPT_OPTIONS.includes(name)) refuse("bad_kept", `openKept has no option "${name}".`, name, `Its options are: ${quoted(KEPT_OPTIONS)}.`);
+  const { keptFormatVersionNumber = 1, settingNames = [], readState = null, restoreState = null } = options;
+  if (!Number.isInteger(keptFormatVersionNumber) || keptFormatVersionNumber < 1) refuse("bad_kept", "keptFormatVersionNumber is a whole number from 1.", "keptFormatVersionNumber", "Start at 1, and add 1 each time the shape of what the piece keeps changes; restoreState gets the number it was kept with.");
+  if (!Array.isArray(settingNames)) refuse("bad_kept", "settingNames is a list of the piece's setting names.", "settingNames", 'Give a list, like ["mouseLookRadPerPx"].');
+  const statedNames = new Map(statement.settings.map((stated) => [camelName(stated.name), stated.name]));
+  for (const name of settingNames) if (!statedNames.has(name)) refuse("unknown_setting", `${pieceName} keeps the setting "${name}", which its statement doesn't have.`, name, "Name only settings its piece.json states, in JavaScript's style.");
+  if ((readState === null) !== (restoreState === null)) refuse("bad_kept", "readState and restoreState come together.", readState === null ? "readState" : "restoreState", "Give both: readState answers the piece's own state as plain data, restoreState(keptState, keptFormatVersionNumber) brings it back, and restoreState(null) puts back what it had when made.");
+  for (const [name, given] of [["readState", readState], ["restoreState", restoreState]]) if (given !== null && typeof given !== "function") refuse("bad_kept", `${name} takes a function.`, name, `Give a function, or leave out both readState and restoreState.`);
+
+  const baseline = new Map(settingNames.map((name) => [name, settings.get(name)]));
+  const listeners = new Set();
+  let isRestoring = false;
+  const changed = () => {
+    if (isRestoring) return;
+    for (const listener of [...listeners]) callSafely(pieceName, "a listener of what it keeps", listener, []);
+  };
+  settings.onChange((change) => {
+    if (baseline.has(change.name)) changed();
+  });
+
+  const kept = {
+    pieceName,
+    keptFormatVersionNumber,
+    /** What the piece keeps now, as plain data: the kept settings that differ from what they were when it was made, and its own state. */
+    read() {
+      const settingValues = {};
+      for (const [name, baselineValue] of baseline) {
+        const currentValue = settings.get(name);
+        if (currentValue !== baselineValue) settingValues[statedNames.get(name)] = currentValue;
+      }
+      return { kept_format_version_number: keptFormatVersionNumber, setting_values: settingValues, piece_state: readState ? JSON.parse(JSON.stringify(readState() ?? null)) : null };
+    },
+    /**
+     * Brings back what read answered, in an earlier play: answers whether it took it. A record kept by a newer
+     * version of the piece is left alone (false), so the save keeps it as it is. null puts back what the piece had
+     * when made. A kept setting the piece no longer takes is skipped, and so is state its restore refuses.
+     */
+    restore(record) {
+      if (record !== null && (!isPlainObject(record) || !Number.isInteger(record.kept_format_version_number))) return false;
+      if (record !== null && record.kept_format_version_number > keptFormatVersionNumber) return false;
+      isRestoring = true;
+      try {
+        const settingValues = record === null || !isPlainObject(record.setting_values) ? {} : record.setting_values;
+        for (const [name, baselineValue] of baseline) {
+          const statedName = statedNames.get(name);
+          const keptValue = Object.hasOwn(settingValues, statedName) ? settingValues[statedName] : baselineValue;
+          try {
+            settings.set({ [name]: keptValue });
+          } catch {
+            settings.set({ [name]: baselineValue }); // A newer piece takes another range: its own value stands.
+          }
+        }
+        if (restoreState) {
+          const pieceState = record === null ? null : (record.piece_state ?? null);
+          callSafely(pieceName, "restoreState", restoreState, [pieceState, record === null ? keptFormatVersionNumber : record.kept_format_version_number]);
+        }
+      } finally {
+        isRestoring = false;
+      }
+      return true;
+    },
+    /** Calls listener whenever what the piece keeps changes. Answers a function that stops it. */
+    onChange(listener) {
+      if (typeof listener !== "function") refuse("bad_kept", "kept.onChange takes a function.", null, "Give a function: it's called with nothing whenever what the piece keeps changes.");
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  return { kept, changed };
 }

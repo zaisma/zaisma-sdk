@@ -28,3 +28,21 @@ What decides a match (scores, items won, rank) belongs on the game server and in
 ## In the game
 
 A game that draws its own save screens uses `Zaisma.saves`: `listCopies()`, `getCopy(saveCopyId)` and `restoreCopy(saveCopyId)` reach the player's earlier versions, `on("conflict")` hears when two devices' progress met and which one won, and `on("developerChange")` hears when the developer changed the save. `Zaisma.player.offerAccount()` picks the moment to ask a guest to make an account and keep their progress, like after their first win.
+
+## With the save piece
+
+`@zaisma/save` (`npx @zaisma/cli pieces add @zaisma/save`, `pieces.md`) does all of the above for the game: a format number with `upgrades` for older saves, writes shortly after a change and at once when the game is hidden or closed, and never writes over a save from a newer version, one it can't read, or one that changed elsewhere. Name the game's pieces in its kept pieces, as below, and what they keep of their own comes back too, like the input piece's rebound controls and sensitivity. Its `index.d.ts` is the reference.
+
+```js
+const save = await openSave({ saveFormatVersionNumber: 1, defaults: { level: 1, coinCount: 0 }, keptPieces: [input] });
+save.update((progress) => { progress.coinCount += 5; });
+Zaisma.saves.on("developerChange", () => save.reread());
+```
+
+It keeps the save in the browser by default, so cloud saves follow it with no code. For progress kept on the game's own game server (a game also played off Zaisma, on your own server), give it a server store and answer its requests in `onRequest` with its `server.js`, the same on Zaisma's rooms and on your own server:
+
+```js
+const save = await openSave({ saveFormatVersionNumber: 1, defaults: { level: 1 }, store: serverStore({ request: (body) => Zaisma.server.request(body) }) });
+// zaisma-server/index.js: import { answerSaveRequest } from "./pieces/@zaisma/save/server.js";
+//   onRequest: const saveAnswer = await answerSaveRequest(player, request, server); if (saveAnswer !== undefined) return saveAnswer;
+```

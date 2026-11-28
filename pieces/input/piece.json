@@ -1,7 +1,7 @@
 {
   "statement_version_number": 1,
   "name": "@zaisma/input",
-  "piece_version": "1.0.0",
+  "piece_version": "1.1.0",
   "kind": "foundation",
   "standard": "@zaisma/standard",
   "summary": "Input for every device: keyboard and mouse, touch and gamepads read as one set of actions the game names, plus where the player moves and how far they turn the view, so a game plays on a phone, a laptop and a controller with no handling of its own for each.",
@@ -10,7 +10,7 @@
   "server_entry_path": null,
   "file_paths": ["index.js", "index.d.ts", "piece.json.js", "README.md", "LICENSE.txt"],
   "server_file_paths": [],
-  "needs": [{ "name": "@zaisma/piece", "version_range": "^1.0.0", "kind": "piece" }],
+  "needs": [{ "name": "@zaisma/piece", "version_range": "^1.1.0", "kind": "piece" }],
   "settings": [
     { "name": "input_enabled", "value_kind": "boolean", "default_value": true, "minimum_number": null, "maximum_number": null, "maximum_character_count": null, "choices": null, "summary": "Whether the player's input is read. Turned off (while a menu or a chat box is open), moving and turning stop, every action is let go and the page's own keys work again." },
     { "name": "mouse_look_mode", "value_kind": "choice", "default_value": "pointer_lock", "minimum_number": null, "maximum_number": null, "maximum_character_count": null, "choices": ["pointer_lock", "hold_button", "off"], "summary": "How the mouse turns the view: pointer_lock hides the pointer on a click and every move turns; hold_button turns only while mouse_look_button is held, keeping the pointer for menus; off leaves the mouse to the game." },

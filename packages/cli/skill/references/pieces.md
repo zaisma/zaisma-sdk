@@ -113,15 +113,24 @@ dash.hooks.on("beforeDash", (dashDistanceM) => (isSlowed ? dashDistanceM / 2 : d
 
 In code a name is in the language's own style (`dash_speed_m_per_sec` is `dashSpeedMPerSec` in JavaScript). A setting or hook the piece doesn't have is refused, with the ones it does have in the error's `fix`; so is a value outside what a setting takes.
 
+**What a piece keeps.** A piece that has something of the player's to bring back next time (the controls they rebound, how fast they like the view to turn) says so with `kept`, which `@zaisma/piece`'s `openKept` opens from the settings that are the player's own choices and any state of its own. Any save keeps it beside the game's progress and gives it back when the game opens: the game names the piece and handles nothing else.
+
+```js
+const save = await openSave({ saveFormatVersionNumber: 1, defaults: { level: 1 }, keptPieces: [input] });
+```
+
+A kept setting is kept only once it differs from what the game made the piece with, so a game that changes its own default later still reaches every player who never changed it. What a piece keeps carries its own format number: a record from a newer version of the piece is kept as it is, never read and never lost, and so is one of a piece the game no longer keeps.
+
 `zaisma pieces` marks a piece whose files were changed by hand, and `pieces update` and `pieces remove` refuse to lose the edits until you say `--discard-edits`.
 
 ## Zaisma's pieces
 
 | Piece | Kind and standard | Gives | Needs |
 | --- | --- | --- | --- |
-| `@zaisma/piece` | `foundation`, its own small standard `@zaisma/piece` | How a JavaScript piece opens its settings and hooks, the same in every piece, in a browser and on a game server. A game never adds it by name: it comes with any piece that needs it. | nothing |
+| `@zaisma/piece` | `foundation`, its own small standard `@zaisma/piece` | How a JavaScript piece opens its settings and hooks, and what it keeps between plays, the same in every piece, in a browser and on a game server. A game never adds it by name: it comes with any piece that needs it. | nothing |
 | [`@zaisma/net`](https://github.com/zaisma/zaisma-sdk/blob/main/pieces/net) | `foundation`, on `@zaisma/standard` | The online core: kinds of sync for characters, objects, events and turns, sharing one room. A piece says what it shares (a character's fields and how it moves a step), never how; the same game runs on Zaisma's relay, with a game server in Zaisma's rooms, and on that game server on your own machine, changing one word. With a game server, a player's own character moves at once and the server's word eases in; everyone else's are drawn smoothly a moment behind; hits can be judged by what the attacker saw. | `@zaisma/piece` |
-| [`@zaisma/input`](https://github.com/zaisma/zaisma-sdk/blob/main/pieces/input) | `foundation`, `@zaisma/standard` | Input for every device: keyboard and mouse, touch (a stick, a drag to look and a button for each action, drawn for it) and gamepads, read as the actions a game names, where the player moves and how far they turn the view in radians. Prompts as each device names its buttons, a controls screen's rebinding, and rumble. | `@zaisma/piece` |
+| [`@zaisma/input`](https://github.com/zaisma/zaisma-sdk/blob/main/pieces/input) | `foundation`, `@zaisma/standard` | Input for every device: keyboard and mouse, touch (a stick, a drag to look and a button for each action, drawn for it) and gamepads, read as the actions a game names, where the player moves and how far they turn the view in radians. Prompts as each device names its buttons, a controls screen's rebinding, and rumble. It keeps the player's rebound controls and their own choices among its settings for a save. | `@zaisma/piece` |
+| [`@zaisma/save`](https://github.com/zaisma/zaisma-sdk/blob/main/pieces/save) | `foundation`, `@zaisma/standard` | Save and load: a game's progress and what each of its pieces keeps of its own, written shortly after a change and at once as the game closes, older saves upgraded, and never written over when it changed elsewhere. Kept in the browser (on Zaisma it follows a signed-in player to every device) or on the game's own game server, the same on Zaisma's rooms and on your own server, with the later of two devices' progress winning. | `@zaisma/piece` |
 | [`@zaisma/lighting`](https://github.com/zaisma/zaisma-sdk/blob/main/pieces/lighting) | `foundation`, `@zaisma/standard` | Lighting and sky for three.js: a sky with sun, moon, stars and clouds, sunlight whose shadows follow the player, fill light, reflections and fog that match it, all set by the time of day, which can run on its own. Night stays playable, every colour can be changed while playing, and its quality fits the device, stepping down while frames run slow. The sky's numbers have no engine, for another engine to follow. | `@zaisma/piece`, the library `three` |
 
 Zaisma's foundations are built on the standard `@zaisma/standard`; the skeleton and its animation names are a small standard of their own, `@zaisma/skeleton`, so another maker's standard can build on just that.

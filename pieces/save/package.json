@@ -1,0 +1,47 @@
+{
+  "name": "@zaisma/save",
+  "version": "1.0.0",
+  "description": "Save and load: a game's progress and what each of its pieces keeps of its own (the player's controls), written at the right moments, upgraded from older saves, never written over when it changed elsewhere, and kept in the browser (on Zaisma it follows the player's account) or on the game's own game server, on Zaisma or a developer's own.",
+  "license": "MIT",
+  "homepage": "https://zaisma.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zaisma/zaisma-sdk.git",
+    "directory": "pieces/save"
+  },
+  "bugs": "https://zaisma.com/forum",
+  "keywords": [
+    "zaisma",
+    "zaisma-piece",
+    "games",
+    "browser-games",
+    "save",
+    "save-game",
+    "cloud-save"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./server": {
+      "types": "./server.d.ts",
+      "default": "./server.js"
+    },
+    "./piece.json": "./piece.json"
+  },
+  "files": [
+    "LICENSE.txt",
+    "README.md",
+    "envelope.js",
+    "index.d.ts",
+    "index.js",
+    "piece.json",
+    "piece.json.js",
+    "server.d.ts",
+    "server.js",
+    "stores.d.ts",
+    "stores.js"
+  ]
+}

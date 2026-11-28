@@ -3,7 +3,7 @@
 // whether the player holds a keyboard and mouse, a phone or a gamepad. The reference is index.d.ts; how it reads
 // each device is written down there and in README.md, so another engine can follow it. MIT licensed.
 
-import { openPiece } from "../piece/index.js";
+import { openKept, openPiece } from "../piece/index.js";
 import statement from "./piece.json.js";
 
 /** The kinds of device a player plays with. */
@@ -17,6 +17,9 @@ export const GAMEPAD_BUTTON_NAMES = ["face_bottom", "face_right", "face_left", "
 
 /** Every mouse button. The wheel's two are pressed for one frame each time it turns a notch. */
 export const MOUSE_BUTTON_NAMES = ["left", "middle", "right", "back", "forward", "wheel_up", "wheel_down"];
+
+/** The settings that are the player's own choices, kept between plays by a save (input.kept); the rest are the game's to tune. */
+export const KEPT_SETTING_NAMES = ["mouseLookRadPerPx", "invertLookYEnabled", "touchLookRadPerPx", "touchButtonSizePx", "gamepadLookRadPerSec", "gamepadFineAimPct", "gamepadSticksSwappedEnabled", "gamepadLabelStyle", "rumbleEnabled"];
 
 /** The four actions every game has, whose bindings move the character alongside the touch stick and the move stick. */
 export const MOVE_ACTION_NAMES = ["moveForward", "moveBack", "moveLeft", "moveRight"];
@@ -166,6 +169,28 @@ export function createInput(given = {}) {
   const actionNames = Object.keys(defaultBindings);
   const copyBinding = (binding) => ({ keys: [...binding.keys], mouseButtons: [...binding.mouseButtons], gamepadButtons: [...binding.gamepadButtons], touchLabel: binding.touchLabel });
   let bindings = Object.fromEntries(actionNames.map((actionName) => [actionName, copyBinding(defaultBindings[actionName])]));
+  const isSameBinding = (one, other) => JSON.stringify(one) === JSON.stringify(other);
+
+  // What the piece keeps between plays, for any save (input.kept): the player's own choices among its settings, and
+  // the controls they changed. Only changed actions are kept, so a game's own new default still reaches the rest.
+  const { kept, changed: keptChanged } = openKept(statement, settings, {
+    settingNames: KEPT_SETTING_NAMES,
+    readState: () => ({ bindings: Object.fromEntries(actionNames.filter((actionName) => !isSameBinding(bindings[actionName], defaultBindings[actionName])).map((actionName) => [actionName, copyBinding(bindings[actionName])])) }),
+    restoreState(keptState) {
+      const keptBindings = keptState !== null && typeof keptState === "object" && keptState.bindings !== null && typeof keptState.bindings === "object" ? keptState.bindings : {};
+      const next = Object.fromEntries(actionNames.map((actionName) => [actionName, copyBinding(defaultBindings[actionName])]));
+      for (const [actionName, binding] of Object.entries(keptBindings)) {
+        if (!actionNames.includes(actionName)) continue; // An action the game no longer has.
+        try {
+          next[actionName] = checkBinding(actionName, { ...next[actionName], ...binding }, `bindings.${actionName}`);
+        } catch {
+          // A control this version doesn't know: the game's own binding stands.
+        }
+      }
+      bindings = next;
+      drawTouchButtons();
+    },
+  });
 
   function known(actionName) {
     if (!actionNames.includes(actionName)) refuse("unknown_action", { message: `There's no action "${actionName}".`, field: "actionName", fix: `This game's actions: ${actionNames.join(", ")}. Name others in createInput's actions.` });
@@ -204,6 +229,7 @@ export function createInput(given = {}) {
   const input = {
     settings,
     hooks,
+    kept,
     /** Where the player wants to go this frame: x to the right, y forward, each -1 to 1, its length 1 at most. */
     move: { x: 0, y: 0 },
     /** How far the player turned the view since the last update, in radians: x to the right, y up. */
@@ -232,6 +258,7 @@ export function createInput(given = {}) {
       const changed = checkBinding(known(actionName), { ...bindings[actionName], ...binding }, "binding");
       bindings = { ...bindings, [actionName]: changed };
       drawTouchButtons();
+      keptChanged();
     },
     setBindings(savedBindings) {
       if (savedBindings === null || typeof savedBindings !== "object" || Array.isArray(savedBindings)) refuse("bad_binding", { message: "setBindings takes an object of bindings by action.", field: "bindings", fix: "Give what input.bindings answered, as the game saved it." });
@@ -243,12 +270,14 @@ export function createInput(given = {}) {
       }
       bindings = next;
       drawTouchButtons();
+      keptChanged();
     },
     resetBindings(names = actionNames) {
       if (!Array.isArray(names)) refuse("bad_argument", { message: "resetBindings takes a list of action names.", field: "names", fix: "Give a list, or nothing to reset every action." });
       for (const actionName of names) known(actionName);
       bindings = { ...bindings, ...Object.fromEntries(names.map((actionName) => [actionName, copyBinding(defaultBindings[actionName])])) };
       drawTouchButtons();
+      keptChanged();
     },
     captureBinding(actionName, captureDeviceKind = null) {
       known(actionName);

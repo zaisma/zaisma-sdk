@@ -149,6 +149,8 @@ export interface GivenToPiece<Values extends Record<string, SettingValue> = Reco
 /** What a piece's own code gets from openHooks: the game's side, and the two calls that run the hooks. */
 export interface OpenedHooks<Handlers extends Record<string, (...given: any[]) => unknown> = Record<string, (...given: any[]) => unknown>> {
   hooks: Hooks<Handlers>;
+  /** Whether the game handles a hook now: for a piece that does something of its own when nobody listens (prints a warning, say). */
+  hasHandlers(name: keyof Handlers & string): boolean;
   /** Calls every handler of an event with details. Throws PieceError "wrong_hook_kind" when the statement has no such event. */
   tell(name: keyof Handlers & string, ...details: unknown[]): void;
   /**
@@ -201,3 +203,62 @@ export declare class PieceError extends Error {
   field: string | null;
   fix: string;
 }
+
+/**
+ * What a piece keeps of its own between plays, as a save finds it on the piece (piece.kept): some of its settings
+ * (the player's own choices) and state of its own (the controls the player chose). Any save can keep any piece
+ * that has one: it reads it, keeps the record beside the game's progress, and gives it back when the game opens.
+ */
+export interface Kept {
+  /** The piece's name, like "@zaisma/input": what a save keeps its record under. */
+  readonly pieceName: string;
+  /** The format of what it keeps: a newer version of the piece that keeps another shape raises it. */
+  readonly keptFormatVersionNumber: number;
+  /** What it keeps now, as plain data. */
+  read(): KeptRecord;
+  /**
+   * Brings back what read answered in an earlier play, and answers whether it took it: a record from a newer
+   * version of the piece is left alone (false), for the save to keep as it is. null puts back what the piece had
+   * when it was made. A setting the piece no longer takes is skipped, and so is state its restore refuses.
+   */
+  restore(record: KeptRecord | null): boolean;
+  /** Calls listener whenever what the piece keeps changes, so a save writes it. Answers a function that stops it. */
+  onChange(listener: () => void): () => void;
+}
+
+/** What a piece keeps, as a save stores it. Names are the statement's, so any engine reads it. */
+export interface KeptRecord {
+  kept_format_version_number: number;
+  /** Each kept setting that differs from what it was when the piece was made, by its stated name: { "invert_look_y_enabled": true }. */
+  setting_values: Record<string, SettingValue>;
+  /** The piece's own state, plain JSON; null when it keeps none. */
+  piece_state: unknown;
+}
+
+/** What openKept takes. */
+export interface KeptOptions {
+  /** The format of what it keeps, from 1 (the default). Raise it when the shape of the piece's own state changes. */
+  keptFormatVersionNumber?: number;
+  /** The settings that are the player's own choices, in JavaScript's style: ["mouseLookRadPerPx", "invertLookYEnabled"]. Never ones the game tunes. */
+  settingNames?: string[];
+  /** Answers the piece's own state to keep, plain JSON. Comes with restoreState. */
+  readState?: () => unknown;
+  /** Brings back what readState answered, kept in the format number given; null means back to what the piece had when made. Comes with readState. */
+  restoreState?: (keptState: unknown, keptFormatVersionNumber: number) => void;
+}
+
+/**
+ * Opens what a piece keeps of its own, for any save to keep. Put kept on the piece as piece.kept; call changed()
+ * after the piece's own state changes. A kept setting is kept once it differs from what it was when the piece was
+ * made, so a game that changes its own default later still reaches players who never changed it. Throws PieceError
+ * "bad_kept" or "unknown_setting": the piece's own mistakes.
+ *
+ * @example
+ * const { kept, changed } = openKept(statement, settings, {
+ *   settingNames: ["mouseLookRadPerPx"],
+ *   readState: () => ({ bindings }),
+ *   restoreState: (keptState) => { bindings = keptState?.bindings ?? defaultBindings; },
+ * });
+ * return { settings, hooks, kept, rebind() { ...; changed(); } };
+ */
+export declare function openKept<Values extends Record<string, SettingValue> = Record<string, SettingValue>>(statement: PieceStatement, settings: Settings<Values>, options?: KeptOptions): { kept: Kept; changed(): void };

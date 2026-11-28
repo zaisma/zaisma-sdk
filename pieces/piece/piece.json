@@ -1,10 +1,10 @@
 {
   "statement_version_number": 1,
   "name": "@zaisma/piece",
-  "piece_version": "1.0.0",
+  "piece_version": "1.1.0",
   "kind": "foundation",
   "standard": "@zaisma/piece",
-  "summary": "How a JavaScript piece opens its settings and hooks, the same way in every piece: settings read from the piece's own statement, checked, and changed while playing, and hooks the piece calls. For a browser and a game server.",
+  "summary": "How a JavaScript piece opens its settings and hooks, the same way in every piece: settings read from the piece's own statement, checked, and changed while playing, hooks the piece calls, and what it keeps between plays for any save. For a browser and a game server.",
   "license": "MIT",
   "entry_path": "index.js",
   "server_entry_path": "index.js",

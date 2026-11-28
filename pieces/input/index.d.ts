@@ -49,7 +49,7 @@
  * or is null, fix says what to do. MIT licensed.
  */
 
-import type { GivenToPiece, Hooks, Settings } from "../piece/index.js";
+import type { GivenToPiece, Hooks, Kept, Settings } from "../piece/index.js";
 
 /** The kinds of device a player plays with. */
 export type DeviceKind = "keyboard_mouse" | "touch" | "gamepad";
@@ -209,6 +209,14 @@ export interface Input {
   readonly isPointerLocked: boolean;
   /** The game's actions, the four move actions included, in the order named. */
   readonly actionNames: string[];
+  /**
+   * What the piece keeps between plays, for any save to keep beside the game's progress (the save piece's
+   * keptPieces): the player's own choices among its settings (KEPT_SETTING_NAMES: how fast the view turns on each
+   * device, inverted look, swapped sticks, button names, rumble, touch button size) and the actions they rebound.
+   * Each is kept only once it differs from what the game made the piece with, so a game that changes its own
+   * defaults later still reaches every player who never changed them.
+   */
+  readonly kept: Kept;
   /** Every action's binding now: a copy, plain data the game can save with the player's settings. */
   readonly bindings: Record<string, Binding>;
   /** Which controller's names labelsOf gives now. */
@@ -278,6 +286,8 @@ export declare const MOVE_ACTION_NAMES: readonly MoveActionName[];
 export declare const DEFAULT_MOVE_BINDINGS: Readonly<Record<MoveActionName, Binding>>;
 /** The actions a game has when it names none: jump (Space, face_bottom, "Jump") and sprint (Shift, left_stick_press, "Run"). */
 export declare const DEFAULT_ACTIONS: Readonly<Record<string, Binding>>;
+/** The settings that are the player's own choices, which input.kept keeps between plays; the rest are the game's to tune. */
+export declare const KEPT_SETTING_NAMES: readonly (keyof InputSettingValues)[];
 /** Each controller's name for each gamepad button, in GAMEPAD_BUTTON_NAMES' order. */
 export declare const GAMEPAD_LABELS: Readonly<Record<GamepadStyle, readonly string[]>>;
 

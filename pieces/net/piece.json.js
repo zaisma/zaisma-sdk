@@ -1,0 +1,141 @@
+// This piece's statement, piece.json, as a module for its own code to read. "zaisma pieces check --fix" writes it: never edit it.
+export default {
+  "statement_version_number": 1,
+  "name": "@zaisma/net",
+  "piece_version": "1.0.0",
+  "kind": "foundation",
+  "standard": "@zaisma/standard",
+  "summary": "The online core: kinds of sync for characters, objects, events and turns, sharing one room. Each piece says what it shares, never how, and it runs the same on Zaisma's relay, on a game server in Zaisma's rooms, and on that game server run on a developer's own machine.",
+  "license": "MIT",
+  "entry_path": "index.js",
+  "server_entry_path": "server.js",
+  "file_paths": [
+    "index.js",
+    "index.d.ts",
+    "core.js",
+    "kinds/define.js",
+    "kinds/events.js",
+    "kinds/objects.js",
+    "kinds/characters.js",
+    "kinds/turns.js",
+    "shape.js",
+    "timing.js",
+    "wire.js",
+    "piece.json.js",
+    "README.md",
+    "LICENSE.txt"
+  ],
+  "server_file_paths": [
+    "server.js",
+    "server.d.ts",
+    "index.d.ts",
+    "kinds/define.js",
+    "kinds/events.js",
+    "kinds/objects.js",
+    "kinds/characters.js",
+    "kinds/turns.js",
+    "shape.js",
+    "timing.js",
+    "wire.js",
+    "piece.json.js"
+  ],
+  "needs": [
+    {
+      "name": "@zaisma/piece",
+      "version_range": "^1.0.0",
+      "kind": "piece"
+    }
+  ],
+  "settings": [
+    {
+      "name": "minimum_interpolation_delay_ms",
+      "value_kind": "number",
+      "default_value": 50,
+      "minimum_number": 0,
+      "maximum_number": 500,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "The least time behind the newest snapshot that others' characters are drawn. It grows by itself to how late and unevenly snapshots arrive, so they never stall or jump; lower it for fights that need the freshest view, raise it to smooth a poor connection more."
+    },
+    {
+      "name": "maximum_extrapolation_ms",
+      "value_kind": "number",
+      "default_value": 100,
+      "minimum_number": 0,
+      "maximum_number": 250,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How far past the newest snapshot another character keeps moving while the next one is late, before it holds still. 0 never guesses."
+    },
+    {
+      "name": "correction_smoothing_sec",
+      "value_kind": "number",
+      "default_value": 0.045,
+      "minimum_number": 0,
+      "maximum_number": 1,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How quickly a correction to the player's own character eases away when the game server saw it somewhere else: most of it is gone in about twice this. 0 jumps at once."
+    },
+    {
+      "name": "snapshots_per_sec",
+      "value_kind": "integer",
+      "default_value": 20,
+      "minimum_number": 1,
+      "maximum_number": 60,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How many times a second the characters' places are sent, by whoever is in charge of them: each player's game for their own on the relay, the game server with one. Never more than the steps a second."
+    },
+    {
+      "name": "turn_time_limit_sec",
+      "value_kind": "number",
+      "default_value": 0,
+      "minimum_number": 0,
+      "maximum_number": 604800,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How long a player has for their turn before it passes to the next. 0 is no limit."
+    },
+    {
+      "name": "objects_owner_left_mode",
+      "value_kind": "choice",
+      "default_value": "remove",
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": [
+        "remove",
+        "give_to_authority"
+      ],
+      "summary": "What happens to a player's shared objects when they leave: removed, or handed to whoever is in charge of the room (the game server, or the room's host on the relay)."
+    }
+  ],
+  "hooks": [
+    {
+      "name": "before_event",
+      "hook_kind": "decision",
+      "summary": "On a game server, asked before a player's event reaches anyone, with true and the event ({ playerId, eventName, payload, roomState }); answer false to stop it."
+    },
+    {
+      "name": "before_object_change",
+      "hook_kind": "decision",
+      "summary": "On a game server, asked before a player makes, changes or removes a shared object, with true and the change ({ playerId, changeKind, object, changes, roomState }); answer false to refuse it, and that player's copy is put right."
+    },
+    {
+      "name": "before_character_input",
+      "hook_kind": "decision",
+      "summary": "On a game server, asked before a player's input moves their character, with the input as received and checked ({ characterId, playerId, roomState }); answer another input to change it, or null to drop it."
+    },
+    {
+      "name": "before_turn_move",
+      "hook_kind": "decision",
+      "summary": "Where the room is decided (the game server, or the host's game on the relay), asked before a player's move in their turn counts, with true and the move ({ playerId, turnNumber, move, roomState }); answer false to refuse it."
+    },
+    {
+      "name": "character_corrected",
+      "hook_kind": "event",
+      "summary": "In a player's game, told when the game server saw the player's own character somewhere other than the game had it, with how far each field was off ({ characterId, difference, isSnapped })."
+    }
+  ]
+};

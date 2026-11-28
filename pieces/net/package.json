@@ -1,0 +1,50 @@
+{
+  "name": "@zaisma/net",
+  "version": "1.0.0",
+  "description": "The online core: kinds of sync for characters, objects, events and turns, sharing one room. Each piece says what it shares, never how, and it runs the same on Zaisma's relay, on a game server in Zaisma's rooms, and on that game server run on a developer's own machine.",
+  "license": "MIT",
+  "homepage": "https://zaisma.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zaisma/zaisma-sdk.git",
+    "directory": "pieces/net"
+  },
+  "bugs": "https://zaisma.com/forum",
+  "keywords": [
+    "zaisma",
+    "zaisma-piece",
+    "games",
+    "browser-games"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./server": {
+      "types": "./server.d.ts",
+      "default": "./server.js"
+    },
+    "./piece.json": "./piece.json"
+  },
+  "files": [
+    "LICENSE.txt",
+    "README.md",
+    "core.js",
+    "index.d.ts",
+    "index.js",
+    "kinds/characters.js",
+    "kinds/define.js",
+    "kinds/events.js",
+    "kinds/objects.js",
+    "kinds/turns.js",
+    "piece.json",
+    "piece.json.js",
+    "server.d.ts",
+    "server.js",
+    "shape.js",
+    "timing.js",
+    "wire.js"
+  ]
+}

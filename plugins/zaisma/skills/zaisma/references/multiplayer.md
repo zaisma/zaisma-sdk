@@ -2,6 +2,10 @@
 
 Open this when the game has online play. It covers what Zaisma's rooms already do for a player whose connection is weak, and what the game itself has to add so it doesn't feel broken. The calls and options here are in `sdk.md` and `game-server.md`.
 
+## Starting from the online core
+
+For a game whose players move characters, share things, send events or take turns, start from the piece `@zaisma/net` (`npx @zaisma/cli pieces add @zaisma/net`, reference in its `index.d.ts`) instead of writing the netcode: the game declares what each thing shares and how a character moves in one step, and the piece does prediction, smoothing, the server's input buffer, late joiners, leavers and turns, the same on the relay and with a game server. What follows still applies to everything else the game sends.
+
 ## What the rooms already do
 
 - **Reconnecting.** The SDK pings the room and reconnects by itself when the connection goes quiet, with no limit on tries. The game keeps the same room object, and `room.connectionStatus` is `"reconnecting"` meanwhile (`"connecting"`, `"open"`, `"reconnecting"` or `"closed"`).

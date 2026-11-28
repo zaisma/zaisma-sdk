@@ -1,0 +1,237 @@
+// This piece's statement, piece.json, as a module for its own code to read. "zaisma pieces check --fix" writes it: never edit it.
+export default {
+  "statement_version_number": 1,
+  "name": "@zaisma/lighting",
+  "piece_version": "1.0.0",
+  "kind": "foundation",
+  "standard": "@zaisma/standard",
+  "summary": "Lighting and sky for three.js: a sky with sun, moon, stars and clouds, sunlight whose shadows follow the player, fill light, reflections and fog that match the sky, all set by the time of day, with quality that fits every device from a phone up.",
+  "license": "MIT",
+  "entry_path": "index.js",
+  "server_entry_path": null,
+  "file_paths": [
+    "index.js",
+    "index.d.ts",
+    "sky.js",
+    "piece.json.js",
+    "README.md",
+    "LICENSE.txt"
+  ],
+  "server_file_paths": [],
+  "needs": [
+    {
+      "name": "@zaisma/piece",
+      "version_range": "^1.0.0",
+      "kind": "piece"
+    },
+    {
+      "name": "three",
+      "version_range": ">=0.163.0 <1.0.0",
+      "kind": "library"
+    }
+  ],
+  "settings": [
+    {
+      "name": "time_of_day_hours",
+      "value_kind": "number",
+      "default_value": 13,
+      "minimum_number": 0,
+      "maximum_number": 24,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "The time of day, from 0 to 24: the sun rises at 6, is highest at 12 and sets at 18. While day_length_min is above 0 it moves on its own, and setting it jumps there."
+    },
+    {
+      "name": "day_length_min",
+      "value_kind": "number",
+      "default_value": 0,
+      "minimum_number": 0,
+      "maximum_number": 10080,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How many real minutes a whole day takes, so the sun crosses the sky while playing; 0 keeps the time where it's set."
+    },
+    {
+      "name": "sun_peak_elevation_deg",
+      "value_kind": "number",
+      "default_value": 62,
+      "minimum_number": 5,
+      "maximum_number": 90,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How high the sun climbs at noon, in degrees above the horizon: lower gives long shadows all day, 90 passes straight overhead."
+    },
+    {
+      "name": "sun_path_turn_deg",
+      "value_kind": "number",
+      "default_value": 0,
+      "minimum_number": 0,
+      "maximum_number": 360,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "Turns the sun's path round the up axis, in degrees counterclockwise seen from above, to choose which way shadows fall. At 0 the sun rises toward +x and is highest toward +z."
+    },
+    {
+      "name": "quality_level",
+      "value_kind": "choice",
+      "default_value": "auto",
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": [
+        "auto",
+        "low",
+        "medium",
+        "high"
+      ],
+      "summary": "How much the lighting draws. low: no shadows, reflections or clouds, for the weakest phones. medium: shadows, reflections and clouds. high: sharper, soft-edged shadows. auto starts at what the device can carry (medium on phones and tablets, high elsewhere) and steps down while frames run slow."
+    },
+    {
+      "name": "shadows_enabled",
+      "value_kind": "boolean",
+      "default_value": true,
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "Whether the sun casts shadows at medium quality and above. Things cast and take shadows once the game passes them to giveShadows, or sets castShadow and receiveShadow itself."
+    },
+    {
+      "name": "shadow_distance_m",
+      "value_kind": "number",
+      "default_value": 30,
+      "minimum_number": 4,
+      "maximum_number": 400,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How far the sun's shadows reach round what they follow, in metres: smaller is sharper, larger reaches further."
+    },
+    {
+      "name": "light_strength_pct",
+      "value_kind": "number",
+      "default_value": 100,
+      "minimum_number": 0,
+      "maximum_number": 400,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How strong the sun (or the moon at night) is, against the time of day's own strength."
+    },
+    {
+      "name": "fill_strength_pct",
+      "value_kind": "number",
+      "default_value": 100,
+      "minimum_number": 0,
+      "maximum_number": 400,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How strong the light from the sky and the ground is, which lights what the sun doesn't reach, against the time of day's own strength."
+    },
+    {
+      "name": "reflections_enabled",
+      "value_kind": "boolean",
+      "default_value": true,
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "Whether three's standard and physical materials reflect the sky and are lit by it, at medium quality and above, so metal and shiny surfaces look right."
+    },
+    {
+      "name": "exposure_pct",
+      "value_kind": "number",
+      "default_value": 100,
+      "minimum_number": 10,
+      "maximum_number": 400,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How bright the whole picture is, as a camera's exposure."
+    },
+    {
+      "name": "tone_mapping",
+      "value_kind": "choice",
+      "default_value": "neutral",
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": [
+        "neutral",
+        "aces",
+        "agx",
+        "none"
+      ],
+      "summary": "How bright light is fitted to the screen. neutral keeps the colours a game picks; aces is a filmic look with deeper contrast; agx softens bright colours toward white; none leaves three's output as it is."
+    },
+    {
+      "name": "fog_enabled",
+      "value_kind": "boolean",
+      "default_value": true,
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "Whether far things fade into the sky's colour, so the world's edge is never a hard line."
+    },
+    {
+      "name": "fog_start_m",
+      "value_kind": "number",
+      "default_value": 60,
+      "minimum_number": 0,
+      "maximum_number": 100000,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How far from the camera the fog starts, in metres."
+    },
+    {
+      "name": "fog_end_m",
+      "value_kind": "number",
+      "default_value": 320,
+      "minimum_number": 1,
+      "maximum_number": 100000,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How far from the camera the fog hides everything, in metres. Keep it inside the camera's far distance."
+    },
+    {
+      "name": "clouds_pct",
+      "value_kind": "number",
+      "default_value": 35,
+      "minimum_number": 0,
+      "maximum_number": 100,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "How much of the sky the clouds cover: 0 is clear, 100 overcast. Clouds drift slowly, and are left out at low quality."
+    },
+    {
+      "name": "stars_enabled",
+      "value_kind": "boolean",
+      "default_value": true,
+      "minimum_number": null,
+      "maximum_number": null,
+      "maximum_character_count": null,
+      "choices": null,
+      "summary": "Whether stars and the moon show in the night sky."
+    }
+  ],
+  "hooks": [
+    {
+      "name": "before_look",
+      "hook_kind": "decision",
+      "summary": "Asked whenever the time of day or a setting changes the look, with every colour and strength: { zenithColor, horizonColor, fogColor, lightColor, lightLux, fillSkyColor, fillGroundColor, fillLux, cloudColor, starsPct }, colours as \"#rrggbb\". Answer a look with any of them changed (a storm, an alien sky, a cave), or nothing to leave it."
+    },
+    {
+      "name": "day_started",
+      "hook_kind": "event",
+      "summary": "Told when the sun comes up and lights the scene again, with the time of day in hours."
+    },
+    {
+      "name": "night_started",
+      "hook_kind": "event",
+      "summary": "Told when the sun goes down far enough that the moon lights the scene, with the time of day in hours."
+    },
+    {
+      "name": "quality_changed",
+      "hook_kind": "event",
+      "summary": "Told when the quality level in use changes, with { qualityLevel, reason }: reason is setting, or slow_frames when auto stepped down because frames ran slow."
+    }
+  ]
+};

@@ -1,0 +1,41 @@
+{
+  "name": "@zaisma/lighting",
+  "version": "1.0.0",
+  "description": "Lighting and sky for three.js: a sky with sun, moon, stars and clouds, sunlight whose shadows follow the player, fill light, reflections and fog that match the sky, all set by the time of day, with quality that fits every device from a phone up.",
+  "license": "MIT",
+  "homepage": "https://zaisma.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zaisma/zaisma-sdk.git",
+    "directory": "pieces/lighting"
+  },
+  "bugs": "https://zaisma.com/forum",
+  "keywords": [
+    "zaisma",
+    "zaisma-piece",
+    "games",
+    "browser-games",
+    "three",
+    "lighting",
+    "sky",
+    "shadows",
+    "day-night"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./piece.json": "./piece.json"
+  },
+  "files": [
+    "LICENSE.txt",
+    "README.md",
+    "index.d.ts",
+    "index.js",
+    "piece.json",
+    "piece.json.js",
+    "sky.js"
+  ]
+}

@@ -45,8 +45,10 @@ The only unit suffixes:
 | `_years` | years, for ages (`minimum_player_age_years`) |
 | `_bytes` | bytes |
 | `_px` | CSS pixels |
+| `_m` | metres, for lengths and distances in a game's world (one three.js unit is a metre) |
 | `_deg` | degrees |
 | `_rad` | radians, for angles a game's 3D maths uses as they are (three.js turns in radians) |
+| `_lux` | lux, for how strongly a light shines, as three.js's lights take it |
 | `_pct` | percent, 0 to 100 (never 0 to 1) |
 | `_cents` | US cents, a number that may have a fraction (`review_cost_cents`); Stripe works in cents too |
 | `_minor_units` | the smallest unit of the currency in the `currency_code` beside it (cents, pence; yen are whole), as Stripe counts amounts (`price_minor_units`) |
